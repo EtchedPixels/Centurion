@@ -53,11 +53,12 @@ static unsigned int next_char(void)
 {
 	char c;
 	if (read(0, &c, 1) != 1) {
-		printf("(tty read without ready byte)\n");
+		fprintf(stderr, "(tty read without ready byte)\n");
 		return 0xFF;
 	}
 	if (c == 0x0A)
 		c = '\r';
+	fprintf(stderr, "[read]%02X\n", c);
 	return c;
 }
 
@@ -117,7 +118,11 @@ static void mux_write(uint16_t addr, uint8_t val)
 	data = addr & 1;
 
 	if (mux == 0 && data) {
-		putchar(val & 0x7F);
+		val &= 0x7F;
+		if (val != 0x0A && val != 0x0D && (val < 0x20 || val == 0x7F))
+			printf("[%02X]", val);
+		else
+			putchar(val);
 		fflush(stdout);
 	}
 }
@@ -279,7 +284,7 @@ int main(int argc, char *argv[])
 	load_rom("Diag_F1_Rev_1.0.BIN", 0x8000, 0x0800);
 	load_rom("Diag_F2_Rev_1.0.BIN", 0x8800, 0x0800);
 	load_rom("Diag_F3_Rev_1.0.BIN", 0x9000, 0x0800);
-	load_rom("Diag_F4_1133CMD.BIN", 0x9000, 0x0800);
+	load_rom("Diag_F4_1133CMD.BIN", 0x9800, 0x0800);
 
 	while (!emulator_done)
 		cpu6_execute_one();

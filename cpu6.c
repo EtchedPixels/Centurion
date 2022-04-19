@@ -162,6 +162,14 @@ uint16_t pop(void)
 
 /*
  *	ALU - logic should be close, but the flags are speculative.
+ *
+ *	This is implemented using AM2901 ALU slices in the real
+ *	hardware. The ALU provides carry in and out but it doesn't
+ *	appear the CPU has any 'with carry' instructions beyond internal
+ *	carry and carry visibility.
+ *
+ *	We should however expect that the likely "flags" are going to be
+ *	carry, zero, negative and overflow.
  */
 
 static void flags(unsigned r)
@@ -457,6 +465,8 @@ static int sub16(unsigned dst, unsigned src)
 
 static int and16(unsigned dst, unsigned src)
 {
+	fprintf(stderr, "%04X: AND16 %d %d  %04X %04X\n", pc,
+		dst, src, regpair_read(dst), regpair_read(src));
 	uint16_t r = regpair_read(dst) & regpair_read(src);
 	regpair_write(dst, r);
 	logic_flags16(r);
@@ -597,15 +607,14 @@ static int branch_op(void)
 	case 5:	/* bnz - known right */
 		t = !(alu_out & ALU_Z);
 		break;
-	case 6:	/* some kind of less than - see 8048 */
-		t = (alu_out & (ALU_C|ALU_Z));
+	case 6:	/* maybe blt - see 8048, 856D */
+		t = !(alu_out & ALU_C);
 		break;
-	case 7:	/* ?? */
-		t = !(alu_out & (ALU_C | ALU_Z));
+	case 7:	/* bge ? 8572 */
+		t = alu_out & ALU_C;
 		break;
 	case 8: /* ?? */
 		t = (alu_out & (ALU_C|ALU_Z));
-		printf("BGT says %d\n", t);
 		break;
 	case 9: /* ble ? */
 		t = !(alu_out & (ALU_C|ALU_Z));
@@ -929,6 +938,11 @@ static int misc3x_op(void)
 		if (reg & 0x0F)
 			return misc2x_special(reg);
 		reg >>= 4;
+		if (reg & 1) {
+			fprintf(stderr, "Unknown misc3x reg encoding %02X at %04X\n", reg, pc);
+			exit(1);
+		}
+		reg >>= 1;
 	}
 
 	switch (op) {
@@ -1025,8 +1039,15 @@ static int alu5x_op(void)
 	unsigned src, dst;
 	if (!(op & 0x08)) {
 		dst = fetch();
+		if (dst & 0x11) {
+			fprintf(stderr, "ALU5 - unknown reg encoding %02X at %04X\n",
+				dst, pc - 1);
+			exit(1);
+		}
 		src = dst >> 4;
 		dst &= 0x0F;
+		src >>= 1;
+		dst >>= 1;
 	}
 	switch (op) {
 	case 0x50:		/* add */
