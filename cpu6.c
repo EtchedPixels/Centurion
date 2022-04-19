@@ -138,16 +138,38 @@ static void regpair_write(uint8_t r, uint16_t v)
 }
 
 /*
+ *	Stack helpers
+ *
+ *	Diag uses -SP and SP+ for stack operations so assume that this is
+ *	the case for internal ones
+ */
+
+void push(uint16_t val)
+{
+	uint16_t addr = regpair_read(SP);
+	addr -= 2;
+	mem_write16(addr, val);
+	regpair_write(SP, addr);
+}
+
+uint16_t pop(void)
+{
+	uint16_t addr = regpair_read(SP);
+	uint16_t d = mem_read16(addr);
+	regpair_write(SP, addr + 2);
+	return d;
+}
+
+/*
  *	ALU - logic should be close, but the flags are speculative.
  */
 
 static void flags(unsigned r)
 {
-	alu_out &= ~(ALU_C | ALU_N | ALU_Z);
+	alu_out &= ~ALU_Z;
 	if (r == 0)
 		alu_out |= ALU_Z;
-	if (r & 0x80)
-		alu_out |= ALU_N;
+	/* N maybe ? but not it seems C */
 }
 
 static void arith_flags(unsigned r)
@@ -183,11 +205,10 @@ static void shift_flags(unsigned c, unsigned r)
 
 static void flags16(unsigned r)
 {
-	alu_out &= ~(ALU_C | ALU_N | ALU_Z);
+	alu_out &= ~ALU_Z;
 	if (r == 0)
 		alu_out |= ALU_Z;
-	if (r & 0x8000)
-		alu_out |= ALU_N;
+	/* N maybe ? but not it seems C */
 }
 
 static void arith_flags16(unsigned r)
@@ -474,10 +495,12 @@ static int mov16(unsigned dst, unsigned src)
 static uint16_t indexed_address(unsigned size)
 {
 	uint8_t idx = fetch();
-	unsigned r = idx >> 4;
+	unsigned r = idx >> 5;		/* No idea what happens if low bit set */
 	unsigned addr;
 	uint8_t offset = 0;		/* Signed or not ? */
 
+	if (idx & 0x10)
+		fprintf(stderr, "indexed address with reg low bit %02X at %04X\n", idx, pc);
 	if (idx & 0x08)
 		offset = fetch();
 	switch(idx & 0x07)
@@ -535,7 +558,7 @@ static uint16_t decode_address(unsigned size, unsigned mode)
 		break;
 	case 6:
 	case 7:
-		fprintf(stderr, "unknown address indexiing %X at %04X\n", mode, pc);
+		fprintf(stderr, "unknown address indexing %X at %04X\n", mode, pc);
 		break;
 	default:
 		/* indexed off a register */
@@ -554,58 +577,56 @@ static int branch_op(void)
 	int8_t off;
 
 	switch (op & 0x0F) {
-	case 0:
+	case 0:	/* bcs */
 		t = (alu_out & ALU_C);
 		break;
-	case 1:
+	case 1:	/* bcc */
 		t = !(alu_out & ALU_C);
 		break;
 	/* Question: is this a sign or arithmetic overflow in fact - ie is
 	   it an N or V ? */
-	case 2:
+	case 2:	/* bns */
 		t = (alu_out & ALU_N);
 		break;
-	case 3:
+	case 3:	/* bnc */
 		t = !(alu_out & ALU_N);
 		break;
-	case 4:
+	case 4:	/* bz	- known right */
 		t = (alu_out & ALU_Z);
 		break;
-	case 5:
+	case 5:	/* bnz - known right */
 		t = !(alu_out & ALU_Z);
 		break;
-	case 6:
-		t = (alu_out & ALU_C);
+	case 6:	/* some kind of less than - see 8048 */
+		t = (alu_out & (ALU_C|ALU_Z));
 		break;
-	case 7:
-		t = !(alu_out & ALU_C);
+	case 7:	/* ?? */
+		t = !(alu_out & (ALU_C | ALU_Z));
 		break;
-		/* What flag sets are tested - are these signed or unsigned. Presumably
-		   signed .. TODO */
-	case 8:	/* blt ? */
-		t = (alu_out & ALU_C);
+	case 8: /* ?? */
+		t = (alu_out & (ALU_C|ALU_Z));
+		printf("BGT says %d\n", t);
 		break;
-	case 9:	/* bge? */
-		t = !(alu_out & ALU_C);
-		break;
-	case 10: /* bgt ?*/
-		t = !(alu_out & (ALU_C|ALU_Z));
-		break;
-	case 11: /* ble ? */
+	case 9: /* ble ? */
 		t = !(alu_out & (ALU_C|ALU_Z));
 		break;
 		/* Switches */
-	case 12:
+	case 10:
 		t = (switches & BS1);
 		break;
-	case 13:
+	case 11:
 		t = (switches & BS2);
 		break;
-	case 14:
+	case 12:
 		t = (switches & BS3);
 		break;
-	case 15:
+	case 13:
 		t = (switches & BS4);
+		break;
+	case 14:
+	case 15:
+		fprintf(stderr, "Unknown branch %02X at %04X\n", op, pc);
+		t = 0;
 		break;
 	}
 	/* We'll keep pc and reg separate until we know if/how it fits memory */
@@ -647,8 +668,9 @@ static int low_op(void)
 		alu_out &= ~(ALU_C | ALU_Z | ALU_N);
 		break;
 	case 0x09:		/* RET */
-		/* RET - appears to be PC = RT */
+		/* RET - see notes on call */
 		pc = regpair_read(RT);
+		regpair_write(RT, pop());
 		break;
 	case 0x0A:		/* RETI - no idea */
 		break;
@@ -730,8 +752,12 @@ static int jump_op(void)
 			pc);
 		return 0;
 	}
-	if (op & 0x08)
+	if (op & 0x08) {
+		/* guesswork time. 8500 implies it is not a simple branch and link */
+		/* the use of rt+ implies it's also not pc stacking, so try rt stacking */
+		push(regpair_read(RT));
 		regpair_write(RT, pc);
+	}
 	pc = new_pc;
 	return 0;
 }
@@ -757,12 +783,11 @@ static int loadbyte_op(void)
 	uint16_t addr = decode_address(1, op & 0x0F);
 	uint8_t r = mem_read8(addr);
 
-	flags(r);
-
 	if (op & 0x40)
 		reg_write(BL, r);
 	else
 		reg_write(AL, r);
+	flags(r);
 	return 0;
 }
 
@@ -770,8 +795,6 @@ static int loadword_op(void)
 {
 	uint16_t addr = decode_address(2, op & 0x0F);
 	uint16_t r = mem_read16(addr);
-
-	flags16(r);
 
 	if (op & 0x40)
 		regpair_write(BX, r);
@@ -791,7 +814,6 @@ static int storebyte_op(void)
 		r = reg_read(AL);
 
 	mem_write8(addr, r);
-	flags(r);
 
 	return 0;
 }
@@ -807,14 +829,16 @@ static int storeword_op(void)
 		r = regpair_read(AL);
 
 	mem_write16(addr, r);
-	flags16(r);
 
 	return 0;
 }
 
 /*
  *	This block of instructions does not seem to affect flags.
- *	See for example diag 8045/8048
+ *	See for example diag 8045/8048 but also 862a where Z is clearly
+ *	changed.
+ *
+ *	Working theory Z only. Possible other option - it matters if A or B
  */
 static int loadstore_op(void)
 {
@@ -974,17 +998,17 @@ static int alu4x_op(void)
 			pc - 1);
 		return 0;
 	case 0x48:
-		return add(AL, BL);
+		return add(BL, AL);
 	case 0x49:
-		return sub(AL, BL);
+		return sub(BL, AL);
 	case 0x4A:
-		return and(AL, BL);
+		return and(BL, AL);
 	case 0x4B:
-		return or(AL, BL);
+		return or(BL, AL);
 	case 0x4C:
-		return xor(AL, BL);
+		return xor(BL, AL);
 	case 0x4D:
-		return mov(AL, BL);
+		return mov(BL, AL);
 	case 0x4E:		/* unused */
 	case 0x4F:		/* unused */
 		fprintf(stderr, "Unknown ALU4 op %02X at %04X\n", op, pc);
@@ -1023,17 +1047,17 @@ static int alu5x_op(void)
 			pc - 1);
 		return 0;
 	case 0x58:
-		return add16(AX, BX);
+		return add16(BX, AX);
 	case 0x59:
-		return sub16(AX, BX);
+		return sub16(BX, AX);
 	case 0x5A:
-		return and16(AX, BX);
+		return and16(BX, AX);
 	case 0x5B:
-		return or16(AX, BX);
+		return or16(BX, AX);
 	case 0x5C:
-		return xor16(AX, BX);
+		return xor16(BX, AX);
 	case 0x5D:
-		return mov16(AX, BX);
+		return mov16(BX, AX);
 	case 0x5E:		/* unused */
 		fprintf(stderr, "Unknown ALU5 op %02X at %04X\n", op, pc);
 		return 0;
@@ -1063,9 +1087,9 @@ static char *flagcode(void)
 
 unsigned cpu6_execute_one(void)
 {
-	printf("CPU %04X: ", pc);
+	fprintf(stderr, "CPU %04X: ", pc);
 	op = fetch();
-	printf("%02X %s AX:%04X  BX:%04X RT:%04X DX:%04X\n",
+	fprintf(stderr, "%02X %s AX:%04X  BX:%04X RT:%04X DX:%04X\n",
 		op, flagcode(), regpair_read(AX), regpair_read(BX),
 		regpair_read(RT), regpair_read(DX));
 	if (op < 0x10)

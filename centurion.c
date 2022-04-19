@@ -104,6 +104,7 @@ static void hexdisplay(uint16_t addr, uint8_t val)
 	else
 		printf(".");
 	printf("]\n");
+	fflush(stdout);
 }
 
 /* Bit 0 of control is char pending. The real system uses mark parity so
@@ -115,8 +116,10 @@ static void mux_write(uint16_t addr, uint8_t val)
 	mux = addr >> 1;
 	data = addr & 1;
 
-	if (mux == 0 && data)
+	if (mux == 0 && data) {
 		putchar(val & 0x7F);
+		fflush(stdout);
+	}
 }
 
 static uint8_t mux_read(uint16_t addr)
