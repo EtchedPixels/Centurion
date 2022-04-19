@@ -12,6 +12,7 @@
 #include <stdio.h>
 #include <stdint.h>
 #include <stdlib.h>
+#include <string.h>
 
 #include "cpu6.h"
 
@@ -126,7 +127,6 @@ static uint16_t regpair_read(uint8_t r)
 
 static void regpair_write(uint8_t r, uint16_t v)
 {
-	printf("RPW %d %04X\n", r, v);
 	if (r > 7) {
 		fprintf(stderr, "Bad regpair encoding %02X %04X\n", op,
 			pc);
@@ -560,6 +560,8 @@ static int branch_op(void)
 	case 1:
 		t = !(alu_out & ALU_C);
 		break;
+	/* Question: is this a sign or arithmetic overflow in fact - ie is
+	   it an N or V ? */
 	case 2:
 		t = (alu_out & ALU_N);
 		break;
@@ -580,13 +582,17 @@ static int branch_op(void)
 		break;
 		/* What flag sets are tested - are these signed or unsigned. Presumably
 		   signed .. TODO */
-	case 8:
+	case 8:	/* blt ? */
+		t = (alu_out & ALU_C);
 		break;
-	case 9:
+	case 9:	/* bge? */
+		t = !(alu_out & ALU_C);
 		break;
-	case 10:
+	case 10: /* bgt ?*/
+		t = !(alu_out & (ALU_C|ALU_Z));
 		break;
-	case 11:
+	case 11: /* ble ? */
+		t = !(alu_out & (ALU_C|ALU_Z));
 		break;
 		/* Switches */
 	case 12:
@@ -1040,12 +1046,27 @@ static int alu5x_op(void)
 	}
 }
 
+static char *flagcode(void)
+{
+	static char buf[5];
+	strcpy(buf, "----");
+	if (alu_out & ALU_C)
+		*buf = 'C';
+	if (alu_out & ALU_I)
+		buf[1] = 'I';
+	if (alu_out & ALU_N)
+		buf[2] = 'N';
+	if (alu_out & ALU_Z)
+		buf[3] = 'Z';
+	return buf;
+}
+
 unsigned cpu6_execute_one(void)
 {
 	printf("CPU %04X: ", pc);
 	op = fetch();
-	printf("%02X AX:%04X  BX:%04X RT:%04X DX:%04X\n",
-		op, regpair_read(AX), regpair_read(BX),
+	printf("%02X %s AX:%04X  BX:%04X RT:%04X DX:%04X\n",
+		op, flagcode(), regpair_read(AX), regpair_read(BX),
 		regpair_read(RT), regpair_read(DX));
 	if (op < 0x10)
 		return low_op();

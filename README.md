@@ -1,6 +1,6 @@
 # Centurion Emulator
 
-An emulator the pieces we know so far of the Centurin Computer CPU-6 and
+An emulator the pieces we know so far of the Centurion Computer CPU-6 and
 the diagnostics ROM images.
 
 ## Completed

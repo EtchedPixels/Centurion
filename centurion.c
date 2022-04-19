@@ -78,7 +78,6 @@ static void hexdisplay(uint16_t addr, uint8_t val)
 		addr >>= 1;
 		hexdots[addr] = onoff;
 	} else {
-		printf("Write to %04X hexblank to %d\n", addr, onoff);
 		hexblank = onoff;
 	}
 	if (hexblank) {
