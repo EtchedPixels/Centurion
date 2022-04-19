@@ -174,10 +174,11 @@ uint16_t pop(void)
 
 static void flags(unsigned r)
 {
-	alu_out &= ~ALU_Z;
+	alu_out &= ~(ALU_Z | ALU_N);
 	if (r == 0)
 		alu_out |= ALU_Z;
-	/* N maybe ? but not it seems C */
+	if (r & 0x80)
+		alu_out |= ALU_N;
 }
 
 static void arith_flags(unsigned r)
@@ -213,10 +214,12 @@ static void shift_flags(unsigned c, unsigned r)
 
 static void flags16(unsigned r)
 {
-	alu_out &= ~ALU_Z;
+	alu_out &= ~(ALU_Z|ALU_N);
 	if (r == 0)
 		alu_out |= ALU_Z;
 	/* N maybe ? but not it seems C */
+	if (r & 0x8000)
+		alu_out |= ALU_N;
 }
 
 static void arith_flags16(unsigned r)
@@ -303,7 +306,7 @@ static int rrc(unsigned reg)
 	uint8_t c = r & 1;
 
 	r >>= 1;
-	r |= c ? 0x80 : 0;
+	r |= (alu_out & ALU_C) ? 0x80 : 0;
 
 	reg_write(reg, r);
 	shift_flags(c, r);
@@ -316,7 +319,7 @@ static int rlc(unsigned reg)
 	uint8_t c = r & 0x80;
 
 	r <<= 1;
-	r |= c ? 1 : 0;
+	r |= (alu_out & ALU_C) ? 1 : 0;
 
 	reg_write(reg, r);
 	shift_flags(c, r);
@@ -427,7 +430,7 @@ static int rrc16(unsigned reg)
 	uint16_t c = r & 1;
 
 	r >>= 1;
-	r |= c ? 0x8000 : 0;
+	r |= (alu_out & ALU_C) ? 0x8000 : 0;
 
 	regpair_write(reg, r);
 	shift_flags16(c, r);
@@ -440,7 +443,7 @@ static int rlc16(unsigned reg)
 	uint16_t c = r & 0x8000;
 
 	r <<= 1;
-	r |= c ? 1 : 0;
+	r |= (alu_out & ALU_C) ? 1 : 0;
 
 	regpair_write(reg, r);
 	shift_flags16(c, r);
@@ -465,8 +468,6 @@ static int sub16(unsigned dst, unsigned src)
 
 static int and16(unsigned dst, unsigned src)
 {
-	fprintf(stderr, "%04X: AND16 %d %d  %04X %04X\n", pc,
-		dst, src, regpair_read(dst), regpair_read(src));
 	uint16_t r = regpair_read(dst) & regpair_read(src);
 	regpair_write(dst, r);
 	logic_flags16(r);
@@ -608,16 +609,17 @@ static int branch_op(void)
 		t = !(alu_out & ALU_Z);
 		break;
 	case 6:	/* maybe blt - see 8048, 856D */
-		t = !(alu_out & ALU_C);
+		t = !(alu_out & (ALU_C|ALU_Z));
 		break;
 	case 7:	/* bge ? 8572 */
 		t = alu_out & ALU_C;
 		break;
-	case 8: /* ?? */
-		t = (alu_out & (ALU_C|ALU_Z));
+	case 8: /* bgt bge ? neg or zero  875x implies that 19xx is <= 0 and
+		   18xx is a signed comparison of some form */
+		t = (alu_out & (ALU_Z|ALU_N));
 		break;
-	case 9: /* ble ? */
-		t = !(alu_out & (ALU_C|ALU_Z));
+	case 9: /* used at 8751 seems to check Z . .speculating on N */
+		t = (alu_out & (ALU_Z|ALU_N));
 		break;
 		/* Switches */
 	case 10:
@@ -732,7 +734,12 @@ static int dma_op(void)
 static int move_op(void)
 {
 	op = fetch();
-	mov16(op & 0x0F, op >> 4);
+	if (op & 0x11) {
+		fprintf(stderr, "Unknown reg encoding %02X for 16bit move at %04X\n",
+			op, pc);
+		exit(1);
+	}
+	mov16(op >> 5, (op & 0x0F) >> 1);
 	return 0;
 }
 
@@ -809,6 +816,7 @@ static int loadword_op(void)
 		regpair_write(BX, r);
 	else
 		regpair_write(AX, r);
+	flags16(r);
 	return 0;
 }
 
@@ -904,6 +912,8 @@ static int misc2x_op(void)
 	case 0x25:
 		return sll(reg);
 	case 0x26:
+		/* Logically this would be rrc reg, but we see use
+		   of 26 00 in 8520-8531 that makes no sense if it is */
 		return rrc(reg);
 	case 0x27:
 		return rlc(reg);
