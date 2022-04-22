@@ -56,8 +56,6 @@ static unsigned int next_char(void)
 		fprintf(stderr, "(tty read without ready byte)\n");
 		return 0xFF;
 	}
-	if (c == 0x0A)
-		c = '\r';
 	fprintf(stderr, "[read]%02X\n", c);
 	return c;
 }
@@ -119,7 +117,8 @@ static void mux_write(uint16_t addr, uint8_t val)
 
 	if (mux == 0 && data) {
 		val &= 0x7F;
-		if (val != 0x0A && val != 0x0D && (val < 0x20 || val == 0x7F))
+		if (val != 0x0A && val != 0x0D
+		    && (val < 0x20 || val == 0x7F))
 			printf("[%02X]", val);
 		else
 			putchar(val);
@@ -140,6 +139,7 @@ static uint8_t mux_read(uint16_t addr)
 	if (mux != 0)
 		return 0;
 
+	/* The ROM expects to see the top bit clear */
 	if (data == 1)
 		return next_char();
 	ttystate = check_chario();
@@ -171,6 +171,14 @@ static void io_write8(uint16_t addr, uint8_t val)
 	}
 }
 
+static uint16_t remap(uint16_t addr)
+{
+	/* We need to fix up the fact the 1K diag RAM appear twice */
+	if (addr >= 0xBC00 && addr <= 0xBFFF)
+		addr -= 0x400;
+	return addr;
+}
+
 static uint8_t do_mem_read8(uint16_t addr, int dis)
 {
 	if (addr >= 0xF000) {
@@ -178,8 +186,10 @@ static uint8_t do_mem_read8(uint16_t addr, int dis)
 			return 0xFF;
 		else
 			return io_read8(addr);
-	} else
+	} else {
+		addr = remap(addr);
 		return mem[addr];
+	}
 }
 
 uint8_t mem_read8(uint16_t addr)
@@ -207,6 +217,7 @@ void mem_write8(uint16_t addr, uint8_t val)
 		fprintf(stderr, "Write to ROM\n");
 		return;
 	}
+	addr = remap(addr);
 	mem[addr] = val;
 }
 
