@@ -3,9 +3,9 @@
  *
  *	We know from f1 that
  *
- *	0xA is SP
+ *	0xA is S
  *	0xE is PC	(or some kind of syscall vector)
- *	0xC is AX	(otherwise the code wouldn't appear)
+ *	0xC is A	(otherwise the code wouldn't appear)
  *
  */
 
@@ -83,7 +83,7 @@ void mem_write16(uint16_t addr, uint16_t val)
  *	add offset
  *
  *	and then the inc of pc before the next instruction works. What
- *	does need a hard look here is the behaviour of RT.
+ *	does need a hard look here is the behaviour of X.
  */
 uint8_t fetch(void)
 {
@@ -142,25 +142,93 @@ static void regpair_write(uint8_t r, uint16_t v)
 /*
  *	Stack helpers
  *
- *	Diag uses -SP and SP+ for stack operations so assume that this is
+ *	Diag uses -S and S+ for stack operations so assume that this is
  *	the case for internal ones. It's also possible they are sliding them
  *	into another register...
  */
 
 void push(uint16_t val)
 {
-	uint16_t addr = regpair_read(SP);
+	uint16_t addr = regpair_read(S);
 	addr -= 2;
 	mem_write16(addr, val);
-	regpair_write(SP, addr);
+	regpair_write(S, addr);
 }
 
 uint16_t pop(void)
 {
-	uint16_t addr = regpair_read(SP);
+	uint16_t addr = regpair_read(S);
 	uint16_t d = mem_read16(addr);
-	regpair_write(SP, addr + 2);
+	regpair_write(S, addr + 2);
 	return d;
+}
+
+void pushbyte(uint8_t val)
+{
+	uint16_t addr = regpair_read(S);
+	addr -= 1;
+	mem_write8(addr, val);
+	regpair_write(S, addr);
+}
+
+uint8_t popbyte(void)
+{
+	uint16_t addr = regpair_read(S);
+	uint8_t d = mem_read8(addr);
+	regpair_write(S, addr + 1);
+	return d;
+}
+
+/*
+ *	The MMU
+ *
+ *	Operations to decode yet
+ *	35 04		- possible set MMU map for editing to AL
+ *	7E 45		- maybe "make mmu ram appear at 0x100"
+ *	7F 45		- maybe "hide mmu ram at 0x0100" (45 implies an
+ *			  op between Z and S)
+ *
+ *	47 40 FF 0100 0200	- possibly MMU on for current IPL
+ *	47 80 FF 0100 0200	- sets Z on some kind of error
+ *
+ *	Probably not chance that 0100 and 0200 match the addresses used in
+ *	the memory tester
+ */
+
+static uint8_t mmu[16][8][2];
+
+
+/*
+ *	MMU load operations
+ *
+ *	256 x 8 of fast (well for the time.. 45ns or so) SRAM that appears
+ *	to be indexed by the top 3 address bits. It looks like it can also
+ *	be made to appear between 0x100-0x11F for a given IPL for diagnostics
+ *
+ *	2E 0C ~bank addresshigh for writes
+ *	2E 1C ~bank addresshigh for reads
+ *
+ *	Seems to work on the current IPL.
+ */
+static int mmu_loadop(void)
+{
+	uint8_t subop = fetch();
+	uint8_t bank = ~fetch();
+	uint16_t val = fetch16();
+
+	if (bank < 0 || bank > 7) {
+		fprintf(stderr, "MMU bad bank %02X at %04X\n", bank, pc - 4);
+		exit(1);
+	}
+	if (subop == 0x1C)
+		mmu[cpu_ipl][bank][1] = (val >> 5);
+	else if (subop == 0x0C)
+		mmu[cpu_ipl][bank][0] = (val >> 5);
+	else {
+		fprintf(stderr, "MMU bad subop %02X at %04X\n", bank, pc - 4);
+		exit(1);
+	}
+	return 0;
 }
 
 /*
@@ -675,7 +743,7 @@ static int mov16(unsigned dst, unsigned src)
 {
 	uint16_t r = regpair_read(src);
 	regpair_write(dst, r);
-	fprintf(stderr, "MOV16 src = %d dst = %d r = %d\n", src, dst, r);
+	fprintf(stderr,  "MOV16 src = %d dst = %d r = %d\n", src, dst, r);
 	ldflags16(r);
 	return 0;
 }
@@ -783,12 +851,12 @@ static uint16_t decode_address(unsigned size, unsigned mode)
  *
  *	The use of 18 and 19 are a bit odd
  *
- *	8751 uses 19 to branch if the load of (RT)+ is negative or zero
+ *	8751 uses 19 to branch if the load of (X)+ is negative or zero
  *		so 19 look like taken on N|Z
  *	87B8 uses char minus 0x5F to decide if it should mask lower case
  *		
  *
- *	8757	uses 18 taken if BX - AX >= 0 (!N !Z)
+ *	8757	uses 18 taken if B - A >= 0 (!N !Z)
  */
 
 static int nxorv(void)
@@ -907,22 +975,45 @@ static int low_op(void)
 		alu_out &= ~ALU_C;
 		break;
 	case 0x08:		/* FCA */
-		alu_out &= ~(ALU_C | ALU_Z | ALU_N);
+		alu_out ^= ALU_C;
 		break;
 	case 0x09:		/* RET */
 		/* RET - see notes on call */
-		pc = regpair_read(RT);
-		regpair_write(RT, pop());
+		pc = regpair_read(X);
+		regpair_write(X, pop());
 		break;
-	case 0x0A:		/* RETI - no idea */
+	case 0x0A:		/* RETI if C  ? */
+		/* C seems to influence reti, mux test on int 6 does
+		  fsc reti if processed, reti if not.. */
 		break;
 	case 0x0E:		/* DELAY */
 		break;
 	case 0x0B:
 	case 0x0C:
 	case 0x0D:
-	case 0x0F:
 		fprintf(stderr, "Unknown op %02X at %04X\n", op, pc);
+	case 0x0F:
+		/* 0F is used in the MMU RAM test - some kind of reti
+		   variant used to flip ipl during the testing or maybe
+		   a syscall style ret */
+		/* The RAM test stacks
+		           ipl.b	; ipl to return to
+		           0.b		;
+		           rt.w		; return RT ?
+		           0.b
+		   and appears to flip ipl and set pc to the old rt so it's
+		   more like a RTWP on a TI990 than a reti ? */
+		{
+			uint16_t new_x, new_pc;
+			popbyte();
+			new_x = pop();
+			popbyte();
+			new_pc = regpair_read(X);
+			cpu_ipl = popbyte() & 0x0F;
+			regpair_write(X, new_x);
+			pc = new_pc;
+			return 0;
+		}
 	}
 	return 0;
 }
@@ -965,6 +1056,12 @@ static int dma_op(void)
 /*
  *	We know this has some flag effects because 8130 relies upon it setting
  *	presumably Z to exit
+ *
+ *	Weirdnesses
+ *	2E 1C and 2E 0C appear to be special and followed by a negated
+ *	mmu slot number and two bytes
+ *	2E 1C is nonsense (word reg low bit set) but 2E 0C ought to be
+ *	AX = GX (whatever GX is - seems to be a mystery)
  */
 static int move_op(void)
 {
@@ -997,7 +1094,7 @@ static int jump_op(void)
 		new_pc = (int8_t) fetch() + pc;	/* TODO: signed or unsigned */
 		break;
 	case 5:
-		new_pc = fetch() + regpair_read(AX);	/* Again signed ? */
+		new_pc = fetch() + regpair_read(A);	/* Again signed ? */
 		break;
 	default:
 		fprintf(stderr, "Invalid jump/call 0x%02X at 0x%04X\n", op,
@@ -1007,8 +1104,8 @@ static int jump_op(void)
 	if (op & 0x08) {
 		/* guesswork time. 8500 implies it is not a simple branch and link */
 		/* the use of rt+ implies it's also not pc stacking, so try rt stacking */
-		push(regpair_read(RT));
-		regpair_write(RT, pc);
+		push(regpair_read(X));
+		regpair_write(X, pc);
 	}
 	pc = new_pc;
 	return 0;
@@ -1022,11 +1119,11 @@ static int rt_op(void)
 	uint16_t addr = decode_address(2, op & 7);
 	uint16_t r;
 	if (op & 0x08) {
-		r = regpair_read(RT);
+		r = regpair_read(X);
 		mem_write16(addr, r);
 	} else {
 		r = mem_read16(addr);
-		regpair_write(RT, r);
+		regpair_write(X, r);
 		ldflags16(r);
 	}
 	return 0;
@@ -1051,9 +1148,9 @@ static int loadword_op(void)
 	uint16_t r = mem_read16(addr);
 
 	if (op & 0x40)
-		regpair_write(BX, r);
+		regpair_write(B, r);
 	else
-		regpair_write(AX, r);
+		regpair_write(A, r);
 	ldflags16(r);
 	return 0;
 }
@@ -1078,9 +1175,9 @@ static int storeword_op(void)
 	uint16_t r;
 
 	if (op & 0x40)
-		r = regpair_read(BL);
+		r = regpair_read(B);
 	else
-		r = regpair_read(AL);
+		r = regpair_read(A);
 
 	mem_write16(addr, r);
 
@@ -1180,7 +1277,7 @@ static int misc2x_op(void)
 /* Like misc2x but word */
 static int misc3x_op(void)
 {
-	unsigned reg = AX;
+	unsigned reg = A;
 	if (!(op & 8)) {
 		reg = fetch();
 		if (reg & 0x0F)
@@ -1213,21 +1310,21 @@ static int misc3x_op(void)
 	case 0x37:
 		return rlc16(reg);
 	case 0x38:
-		return inc16(AX);
+		return inc16(A);
 	case 0x39:
-		return dec16(AX);
+		return dec16(A);
 	case 0x3A:
-		return clr16(AX);
+		return clr16(A);
 	case 0x3B:
-		return not16(AX);
+		return not16(A);
 	case 0x3C:
-		return srl16(AX);
+		return srl16(A);
 	case 0x3D:
-		return sll16(AX);
+		return sll16(A);
 	case 0x3E:		/* To check */
-		return inc16(RT);
+		return inc16(X);
 	case 0x3F:
-		return dec16(RT);
+		return dec16(X);
 	default:
 		fprintf(stderr, "internal error misc3\n");
 		exit(1);
@@ -1319,22 +1416,22 @@ static int alu5x_op(void)
 			pc - 1);
 		return 0;
 	case 0x58:
-		return add16(BX, AX);
+		return add16(B, A);
 	case 0x59:
-		return sub16(BX, AX);
+		return sub16(B, A);
 	case 0x5A:
-		return and16(BX, AX);
+		return and16(B, A);
 	case 0x5B:
-		return or16(BX, AX);
+		return or16(B, A);
 	case 0x5C:
-		return xor16(BX, AX);
+		return xor16(B, A);
 	case 0x5D:
-		return mov16(BX, AX);
+		return mov16(B, A);
 	case 0x5E:		/* unused */
 		fprintf(stderr, "Unknown ALU5 op %02X at %04X\n", op, pc);
 		return 0;
 	case 0x5F:		/* unused */
-		mov16(SP, AX);
+		mov16(S, A);
 		return 0;
 	default:
 		fprintf(stderr, "internal error alu5\n");
@@ -1363,9 +1460,10 @@ unsigned cpu6_execute_one(void)
 {
 	fprintf(stderr, "CPU %04X: ", pc);
 	op = fetch();
-	fprintf(stderr, "%02X %s AX:%04X  BX:%04X RT:%04X DX:%04X\n",
-		op, flagcode(), regpair_read(AX), regpair_read(BX),
-		regpair_read(RT), regpair_read(DX));
+	fprintf(stderr, "%02X %s A:%04X  B:%04X X:%04X Y:%04X Z:%04X S:%04X\n",
+		op, flagcode(), regpair_read(A), regpair_read(B),
+		regpair_read(X), regpair_read(Y), regpair_read(Z),
+		regpair_read(S));
 	if (op < 0x10)
 		return low_op();
 	if (op < 0x20)
