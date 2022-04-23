@@ -1,12 +1,17 @@
 /*
- *	We are not clear yet how the registers are mapped into the RAM
+ *	In the SRAM bank the registers are laid out as
  *
- *	We know from f1 that
+ *	0x0E	H	(seems to hold PC on IPL changes but otherwise not)
+ *			(possibly PC is cached in the CPU)
+ *	0x0C	G
+ *	0x0A	S
+ *	0x08	Z
+ *	0x06	Y
+ *	0x04	X
+ *	0x02	B
+ *	0x00	A
  *
- *	0xA is S
- *	0xE is PC	(or some kind of syscall vector)
- *	0xC is A	(otherwise the code wouldn't appear)
- *
+ *	(see monitor 84C3)
  */
 
 #include <stdio.h>
@@ -17,20 +22,42 @@
 #include "cpu6.h"
 
 static unsigned cpu_ipl = 0;
-static uint16_t pc = 0x8001;	/* Hack for now */
+static uint16_t pc = 0xFC00;
 static uint8_t op;
 static uint8_t alu_out;
 static uint8_t switches = 0xF0;
 
-#define BS1	0x80
-#define BS2	0x40
-#define BS3	0x20
-#define BS4	0x10
+#define BS1	0x01
+#define BS2	0x02
+#define BS3	0x04
+#define BS4	0x08
 
 static uint16_t dma_addr;
 static uint16_t dma_count;
 static uint8_t dma_mode;
 static uint8_t dma_enable;
+
+/*
+ *	DMA engine guesswork
+ */
+
+int dma_read_cycle(uint8_t byte)
+{
+	if (dma_enable == 0)
+		return 1;
+	/* DMA is done when it incs to 0 */
+	if (++dma_count == 0) {
+		dma_enable = 0;
+		return 1;
+	}
+	/* Hawk uses this */
+	if (dma_mode == 0 && dma_enable) {
+		mem_write8(dma_addr++, byte);
+		dma_count++;
+	}
+	return 0;
+}
+
 /*
  *	We don't know of any more direct access to these as a register
  *	by some other means so our order is arbitrary. Given the 4 switches
@@ -191,6 +218,8 @@ uint8_t popbyte(void)
  *	47 40 FF 0100 0200	- possibly MMU on for current IPL
  *	47 80 FF 0100 0200	- sets Z on some kind of error
  *
+ *	??
+ *
  *	Probably not chance that 0100 and 0200 match the addresses used in
  *	the memory tester
  */
@@ -203,16 +232,16 @@ static uint8_t mmu[16][8][2];
  *
  *	256 x 8 of fast (well for the time.. 45ns or so) SRAM that appears
  *	to be indexed by the top 3 address bits. It looks like it can also
- *	be made to appear between 0x100-0x11F for a given IPL for diagnostics
+ *	be made to appear between 0x100-0x11F and 0x200-0x21f for a given IPL
+ *	for diagnostics
  *
  *	2E 0C ~bank addresshigh for writes
  *	2E 1C ~bank addresshigh for reads
  *
  *	Seems to work on the current IPL.
  */
-static int mmu_loadop(void)
+static int mmu_loadop(uint8_t subop)
 {
-	uint8_t subop = fetch();
 	uint8_t bank = ~fetch();
 	uint16_t val = fetch16();
 
@@ -228,6 +257,21 @@ static int mmu_loadop(void)
 		fprintf(stderr, "MMU bad subop %02X at %04X\n", bank, pc - 4);
 		exit(1);
 	}
+	return 0;
+}
+
+static int mmu_op47(void)
+{
+	uint8_t b3;
+	/* should be followed by 40 FF or 80 FF then two addresses. We have
+	   no clear idea what it does but the addresses match the spots used
+	   for memory testing */
+	fetch();
+	b3 = fetch();
+	fetch16();
+	fetch16();
+	if (b3 == 0x80)
+		alu_out |= ALU_Z;
 	return 0;
 }
 
@@ -578,7 +622,7 @@ static int sub(unsigned dst, unsigned src)
 	unsigned s = reg_read(src);
 	unsigned d = reg_read(dst);
 	unsigned r = d - s;
-	fprintf(stderr, "D %X - S %X = %X\n", d, s, r);
+//	fprintf(stderr, "D %X - S %X = %X\n", d, s, r);
 	reg_write(dst, r);
 	sub_flags(s, d);
 	return 0;
@@ -743,7 +787,6 @@ static int mov16(unsigned dst, unsigned src)
 {
 	uint16_t r = regpair_read(src);
 	regpair_write(dst, r);
-	fprintf(stderr,  "MOV16 src = %d dst = %d r = %d\n", src, dst, r);
 	ldflags16(r);
 	return 0;
 }
@@ -758,7 +801,7 @@ static uint16_t indexed_address(unsigned size)
 	uint8_t idx = fetch();
 	unsigned r = idx >> 5;	/* No idea what happens if low bit set */
 	unsigned addr;
-	uint8_t offset = 0;	/* Signed or not ? */
+	int8_t offset = 0;	/* Signed or not ? */
 
 	if (idx & 0x10)
 		fprintf(stderr,
@@ -807,12 +850,12 @@ static uint16_t decode_address(unsigned size, unsigned mode)
 		indir = 2;
 		break;
 	case 3:
-		addr = pc + fetch();	/* signed ? */
-		indir = 1;
+		addr = pc + (int8_t)fetch();	/* signed ? */
+		indir = 0;
 		break;
 	case 4:
-		addr = pc + fetch();
-		indir = 2;
+		addr = pc + (int8_t)fetch();
+		indir = 1;
 		break;
 	case 5:
 		/* Indexed modes */
@@ -1028,16 +1071,16 @@ static int dma_op(void)
 
 	switch (op & 0x0F) {
 	case 0:
-		dma_addr = regpair_read(rp);
+		dma_addr = regpair_read(rp >> 1);
 		break;
 	case 1:
-		regpair_write(rp, dma_addr);
+		regpair_write(rp >> 1, dma_addr);
 		break;
 	case 2:
-		dma_count = regpair_read(rp);
+		dma_count = regpair_read(rp >> 1);
 		break;
 	case 3:
-		regpair_write(rp, dma_count);
+		regpair_write(rp >> 1, dma_count);
 		break;
 	case 4:
 		dma_mode = rp;
@@ -1061,11 +1104,14 @@ static int dma_op(void)
  *	2E 1C and 2E 0C appear to be special and followed by a negated
  *	mmu slot number and two bytes
  *	2E 1C is nonsense (word reg low bit set) but 2E 0C ought to be
- *	AX = GX (whatever GX is - seems to be a mystery)
+ *	A = G (whatever G is - seems to be a mystery)
  */
 static int move_op(void)
 {
 	op = fetch();
+	/* Seem to be some strange gaps here */
+	if (op == 0x0C || op == 0x1C)
+		return mmu_loadop(op);
 	if (op & 0x11) {
 		fprintf(stderr,
 			"Unknown reg encoding %02X for 16bit move at %04X\n",
@@ -1076,6 +1122,17 @@ static int move_op(void)
 	return 0;
 }
 
+/*
+ *	Jump doesn't quite match the op decodes for the load/store strangely
+ *
+ *	0 would be nonsense
+ *	1,2,3 seem to match
+ *	5 is used for what we would expect to be indexed modes but we only
+ *	see it used as if the indexing byte was implicitly 8 (A + offset)
+ *
+ *	4,6,7 we don't know but 6,7 are not used for load/store and 4 is
+ *	an indirect so is perhaps mem_read16(mem_read16(fetch16()));
+ */
 static int jump_op(void)
 {
 	uint16_t new_pc;
@@ -1087,11 +1144,15 @@ static int jump_op(void)
 	case 1:		/* Immediate */
 		new_pc = fetch16();
 		break;
-	case 2:		/* Apparently indirected which isn't what would be expected */
+	case 2:		/* Jump to contents of address given */
 		new_pc = mem_read16(fetch16());
 		break;
 	case 3:
 		new_pc = (int8_t) fetch() + pc;	/* TODO: signed or unsigned */
+		break;
+	case 4:		/* Jump to contents of address given indirected */
+		/* This one is a guess - we've not seen it */
+		new_pc = mem_read16(mem_read16(fetch16()));
 		break;
 	case 5:
 		new_pc = fetch() + regpair_read(A);	/* Again signed ? */
@@ -1103,7 +1164,7 @@ static int jump_op(void)
 	}
 	if (op & 0x08) {
 		/* guesswork time. 8500 implies it is not a simple branch and link */
-		/* the use of rt+ implies it's also not pc stacking, so try rt stacking */
+		/* the use of rt+ implies it's also not pc stacking, so try old X stacking */
 		push(regpair_read(X));
 		regpair_write(X, pc);
 	}
@@ -1112,7 +1173,7 @@ static int jump_op(void)
 }
 
 /*
- *	This appears to work like the other loads and not affect C or N
+ *	This appears to work like the other loads and not affect C
  */
 static int rt_op(void)
 {
@@ -1185,11 +1246,10 @@ static int storeword_op(void)
 }
 
 /*
- *	In the CPU test we verify that LD to AL or BL does not affect C or N
+ *	In the CPU test we verify that LD to AL or BL does not affect C
  *	but we do check that Z is set if 0 is loaded.
  *
- *	Elsewhere we rely upon N changing and in odd ways on an LD from
- *	non constant.
+ *	Elsewhere we rely upon N changing and V being set
  *
  */
 static int loadstore_op(void)
@@ -1212,10 +1272,12 @@ static int loadstore_op(void)
 static int misc2x_special(uint8_t reg)
 {
 	/* The only code we know is 22 32 which seems ot be some kind of cpu
-	   ident/status check */
+	   ident/status check. It's not clear if there is a proper supervisor
+	   check involved here for the NZ->Z case and a CPU type check for Z->NZ
+	   or what */
 	if (op == 0x22 && reg == 0x32) {
 		/* CPU ID ?? */
-		alu_out |= ALU_Z;
+		alu_out ^= ALU_Z;
 		return 0;
 	}
 	fprintf(stderr, "Unknown misc2x special %02X:%02X at %04X\n", op,
@@ -1247,8 +1309,6 @@ static int misc2x_op(void)
 	case 0x25:
 		return sll(reg);
 	case 0x26:
-		/* Logically this would be rrc reg, but we see use
-		   of 26 00 in 8520-8531 that makes no sense if it is */
 		return rrc(reg);
 	case 0x27:
 		return rlc(reg);
@@ -1332,6 +1392,7 @@ static int misc3x_op(void)
 }
 
 /* Mostly ALU operations on AL */
+/* We have a very strange operation 47 40 */
 static int alu4x_op(void)
 {
 	unsigned src, dst;
@@ -1354,10 +1415,11 @@ static int alu4x_op(void)
 	case 0x45:		/* mov */
 		return mov(dst, src);
 	case 0x46:		/* unused */
-	case 0x47:		/* unused */
 		fprintf(stderr, "Unknown ALU4 op %02X at %04X\n", op,
 			pc - 1);
 		return 0;
+	case 0x47:		/* unused */
+		return mmu_op47();
 	case 0x48:
 		return add(BL, AL);
 	case 0x49:
@@ -1427,10 +1489,10 @@ static int alu5x_op(void)
 		return xor16(B, A);
 	case 0x5D:
 		return mov16(B, A);
-	case 0x5E:		/* unused */
-		fprintf(stderr, "Unknown ALU5 op %02X at %04X\n", op, pc);
+	case 0x5E:		/* special case move */
+		mov16(Z, A);
 		return 0;
-	case 0x5F:		/* unused */
+	case 0x5F:		/* special case move */
 		mov16(S, A);
 		return 0;
 	default:
@@ -1439,6 +1501,12 @@ static int alu5x_op(void)
 	}
 }
 
+/*
+ *	The CPU has directly controlled flags for C N Z I
+ *	We know from the branch rules there is an internal V flag
+ *	The front panel implies we have an L but we don't know too much
+ *	about it.
+ */
 static char *flagcode(void)
 {
 	static char buf[6];
@@ -1456,14 +1524,16 @@ static char *flagcode(void)
 	return buf;
 }
 
-unsigned cpu6_execute_one(void)
+unsigned cpu6_execute_one(unsigned trace)
 {
-	fprintf(stderr, "CPU %04X: ", pc);
+	if (trace)
+		fprintf(stderr, "CPU %04X: ", pc);
 	op = fetch();
-	fprintf(stderr, "%02X %s A:%04X  B:%04X X:%04X Y:%04X Z:%04X S:%04X\n",
-		op, flagcode(), regpair_read(A), regpair_read(B),
-		regpair_read(X), regpair_read(Y), regpair_read(Z),
-		regpair_read(S));
+	if (trace)
+		fprintf(stderr, "%02X %s A:%04X  B:%04X X:%04X Y:%04X Z:%04X S:%04X\n",
+			op, flagcode(), regpair_read(A), regpair_read(B),
+			regpair_read(X), regpair_read(Y), regpair_read(Z),
+			regpair_read(S));
 	if (op < 0x10)
 		return low_op();
 	if (op < 0x20)
@@ -1488,4 +1558,9 @@ unsigned cpu6_execute_one(void)
 uint16_t cpu6_pc(void)
 {
 	return pc;
+}
+
+void cpu6_set_switches(unsigned v)
+{
+	switches = v;
 }

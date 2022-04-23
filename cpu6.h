@@ -29,4 +29,6 @@ extern uint8_t mem_read8(uint16_t addr);
 extern void mem_write8(uint16_t addr, uint8_t val);
 extern void halt_system(void);
 extern uint16_t cpu6_pc(void);
-extern unsigned cpu6_execute_one(void);
+extern unsigned cpu6_execute_one(unsigned trace);
+extern int dma_read_cycle(uint8_t data);
+extern void cpu6_set_switches(unsigned switches);
