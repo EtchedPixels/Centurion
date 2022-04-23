@@ -50,12 +50,31 @@ int dma_read_cycle(uint8_t byte)
 		dma_enable = 0;
 		return 1;
 	}
-	/* Hawk uses this */
-	if (dma_mode == 0 && dma_enable) {
+	if (dma_enable) {
 		mem_write8(dma_addr++, byte);
-		dma_count++;
 	}
 	return 0;
+}
+
+int dma_write_active(void)
+{
+	if (dma_enable == 1)
+		return 1;
+	return 0;
+}
+
+uint8_t dma_write_cycle(void)
+{
+	uint8_t r;
+	if (dma_enable == 0) {
+		fprintf(stderr, "DMA write cycle with no DMA\n");
+		exit(1);
+	}
+	r = mem_read8(dma_addr++);
+	dma_count++;
+	if (dma_count == 0)
+		dma_enable = 0;
+	return r;
 }
 
 /*
@@ -494,7 +513,7 @@ static void shift_flags16(unsigned c, unsigned r)
 		alu_out |= ALU_Z;
 	if (c)
 		alu_out |= ALU_C;
-	if (r & 0x80)
+	if (r & 0x8000)
 		alu_out |= ALU_N;
 }
 
@@ -1174,6 +1193,9 @@ static int jump_op(void)
 
 /*
  *	This appears to work like the other loads and not affect C
+ *	It also seems (see diagnostics) not to affect the other flags unlike
+ *	an A or B load. That makes sense given you want to pass flags
+ *	and often finish with LD RT,(SP)+, RET which would trash them
  */
 static int rt_op(void)
 {
@@ -1185,7 +1207,6 @@ static int rt_op(void)
 	} else {
 		r = mem_read16(addr);
 		regpair_write(X, r);
-		ldflags16(r);
 	}
 	return 0;
 }
@@ -1483,18 +1504,18 @@ static int alu5x_op(void)
 		return sub16(B, A);
 	case 0x5A:
 		return and16(B, A);
-	case 0x5B:
-		return or16(B, A);
+	case 0x5B:	/* Microcode and 86D7 suggest not an or16 */
+		/* return or16(B, A); */
+		return mov16(X, A);
+	/* These are borrowed for moves */
 	case 0x5C:
-		return xor16(B, A);
+		return mov16(Y, A);
 	case 0x5D:
 		return mov16(B, A);
-	case 0x5E:		/* special case move */
-		mov16(Z, A);
-		return 0;
-	case 0x5F:		/* special case move */
-		mov16(S, A);
-		return 0;
+	case 0x5E:
+		return mov16(Z, A);
+	case 0x5F:
+		return mov16(S, A);
 	default:
 		fprintf(stderr, "internal error alu5\n");
 		exit(1);

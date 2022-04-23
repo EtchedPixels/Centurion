@@ -31,4 +31,6 @@ extern void halt_system(void);
 extern uint16_t cpu6_pc(void);
 extern unsigned cpu6_execute_one(unsigned trace);
 extern int dma_read_cycle(uint8_t data);
+extern uint8_t dma_write_cycle(void);
+extern int dma_write_active(void);
 extern void cpu6_set_switches(unsigned switches);

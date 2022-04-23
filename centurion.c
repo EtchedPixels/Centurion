@@ -21,6 +21,8 @@ volatile unsigned int emulator_done;
 #define TRACE_MEM	1
 #define TRACE_MEM_REG	2
 #define TRACE_CPU	4
+#define TRACE_FDC	8
+#define TRACE_CMD	16
 
 unsigned int trace = 0;
 
@@ -188,16 +190,71 @@ static uint8_t mux_read(uint16_t addr)
  *
  *	Command codes
  *	0:		Read
+ *	1:		Write
+ *	2:		Seek
  *	3:		Restore
+ *
+ *	The Hawk interface seems to be an oddity as it doesn't appear to use
+ *	the Fin Fout Busy style interface and sequencer but something smarter
+ *	of its own.
+ *
+ *	This is roughly complete except that we don't know what actual
+ *	error codes were used, and this ignores the unit select entirely
+ *	at the moment.
  */
 
 static uint8_t hawk_unit;
-static uint8_t hawk_cyl;
 static uint8_t hawk_sech;
+static uint8_t hawk_secl;
 static uint8_t hawk_busy;
 static uint8_t hawk_status;
 static unsigned hawk_dma;
 static int hawk_fd;
+
+/*	"Cylinder  0 - 405
+ *	 MSB:
+ *		Cyl 256
+ *		Cyl 128
+ *		Cyl 64
+ *		Cyl 32
+ *		Cyl 16
+ *		Cyl 8
+ *		Cyl 4
+ *		Cyl 2
+ *		Cyl 1
+ *		Head 0/1,
+ *		Sector 8,
+ *		Sector 4,
+ *		Sector 2,
+ *		Sector 1.
+ *	 LSB
+ *
+ *       Max Cyl - 405,  Max Heads 0 /1 ,  Max Sectors 0-F .   So Max
+ *	 Tracks are 810  =   405 Cyl x two Heads with 16 sectors of 400
+ *	 bytes per track"
+ *		-- Ken Romain
+ */
+static void hawk_position(void)
+{
+	unsigned sec = hawk_secl & 0x0F;
+	unsigned head = !!(hawk_secl & 0x10);
+	unsigned cyl = (hawk_sech << 3) | (hawk_secl >> 5);
+	off_t offset = cyl;
+
+	offset *= 2;
+	offset += head;
+	offset *= 16;
+	offset += sec;
+	offset *= 400;
+
+	if (lseek(hawk_fd, offset, SEEK_SET) == -1) {
+		fprintf(stderr, "hawk position failed (%d,%d,%d) = %lx.\n",
+			cyl, head, sec, (long)offset);
+		hawk_dma = 0;
+		hawk_busy = 0;
+		hawk_status = 0xFE;
+	}
+}
 
 static uint8_t hawk_read_next(void)
 {
@@ -211,6 +268,16 @@ static uint8_t hawk_read_next(void)
 	return c;
 }
 
+static void hawk_write_next(uint8_t c)
+{
+	if (write(hawk_fd, (void *)&c, 1) != 1) {
+		hawk_status = 0xFE;	/* dunno but it does for error, completed */
+		hawk_dma = 0;
+		hawk_busy = 0;
+		fprintf(stderr, "hawk I/O error\n");
+	}
+}
+
 static void hawk_dma_done(void)
 {
 	hawk_busy = 0;
@@ -218,15 +285,45 @@ static void hawk_dma_done(void)
 	hawk_dma = 0;
 }
 
+/*
+ *	Commands and registers as described by Ken Romain except status
+ *	was in a slightly different spot.
+ *
+ *	"The Hawk disk controller design (DSK/Auto & DSKII) was 6 years
+ *	 before the AMD2901 was available.  The (DSK/Auto & DSKII) is a
+ *	 simple MMIO with a TTL state machine which runs in sync with the
+ *	 Hawks Read / Write data stream to advance the state machine.
+ *
+ *	 A basic sector read from the Hawk (DSK/Auto & DSKII)  is....
+ *	 Drive select Reg.  0xF140,    Sector address Reg. 0xF141-F142
+ *	 Status Reg ( I think ) 0xF143   and Command Reg 0xF148 (00 = read,
+ *	 01 = write,  02 = seek,   03 = RTZ Return Track Zero.
+ *       The (DSK/Auto & DSKII)  Hawk sectors are 400 bytes ( 0x190) long
+ *	 and R / W can be 1 to 16 sector operations based on the total bytes
+ *	 the DMA was setup to move in /out of DRAM. "
+ *			-- Ken Romain
+ *
+ */
 static void hawk_cmd(uint8_t cmd)
 {
 	switch(cmd) {
-	case 0:	/* Multi sector read */
+	case 0:	/* Multi sector read  - 1 to 16 sectors */
 		hawk_busy = 1;
 		hawk_dma = 1;
 		hawk_status = 1;	/* Busy */
+		hawk_position();
 		break;
-	case 3:
+	case 1:	/* Multi sector write - ditto */
+		hawk_busy = 1;
+		hawk_dma = 2;
+		hawk_status = 1;
+		hawk_position();
+		break;
+	case 2:	/* Seek */
+		hawk_status = 0;
+		hawk_busy = 0;
+		break;
+	case 3:	/* Restore */
 		hawk_status = 0;
 		hawk_busy = 0;
 		break;
@@ -246,10 +343,10 @@ static void hawk_write(uint16_t addr, uint8_t val)
 		hawk_unit = val;
 		break;
 	case 0xF141:
-		hawk_cyl = val;
+		hawk_sech = val;
 		break;
 	case 0xF142:
-		hawk_sech = val;
+		hawk_secl = val;
 		break;
 	/* This seems to be a word. The code checks F144 bit 2 for
 	   an error situation, and after the read F144 non zero for error */
@@ -286,20 +383,275 @@ static uint8_t hawk_read(uint16_t addr)
 	}
 }
 
+/*
+ *	Floppy controller (or what we know of it)
+ *
+ *	"The CMD controller and Floppy Controller are AMD2901 based
+ *	 controllers that move a command string into the controller under
+ *	 DMA control  then the AMD2901 runs the command string then moves
+ *	 the Read / Write data in or out of the controller under DMA control."
+ *			-- Ken Romain
+ *
+ *	Write 43 to F800 to load a command
+ *	Write 45 to enable data receive (needed even if no data)
+ *	F801 is the in/out/busy bits, F800 the status where top bit = error
+ *
+ *	Commands
+ *	81 01 82		Restore
+ *	81 01 83 track		Seek
+ *
+ *	81 00 or 81 01		always starts
+ *	82 XX			restore
+ *	83 track		seek to track
+ *	88 sec track len.w	read
+ *
+ *	Boot uses (seek to track 0 load a super long sector 0 ?)
+ *	81 00 83 00 88 00 00 0F00
+ *
+ *	The hard disk controller seems close but not quite the same. The
+ *	bootstrap uses something like
+ *
+ *	81 00 84 0F+unit 83 00 00 85 00 0190 01 0190 02 0190 ...
+ */
+
+static uint8_t fdcmd[256];
+static unsigned fd_ptr;
+static unsigned fd_dma;
+static uint8_t fd_status;
+static uint8_t fd_bits;
+
+static void fdc_dma_cmd_in(uint8_t data)
+{
+	if (fd_ptr == 256) {
+		fprintf(stderr, "%04X: overlong fdc command %02X\n", data, cpu6_pc());
+		return;
+	}
+	fdcmd[fd_ptr++] = data;
+}
+
+static uint8_t fdc_dma_cmd_out(void)
+{
+	if (fd_ptr == 256) {
+		fprintf(stderr, "%04X: overlong fdc command read\n", cpu6_pc());
+		return 0xFF;
+	}
+	return fdcmd[fd_ptr++];
+}
+
+static void fdc_dma_cmd_done(void)
+{
+	unsigned i;
+	if (trace & TRACE_FDC) {
+		fprintf(stderr, "fdcmd: %d\n\t", fd_ptr);
+		for (i = 0; i < fd_ptr; i++) {
+			fprintf(stderr, "%02X ", fdcmd[i]);
+			if (((i & 15) == 15) && i != fd_ptr - 1)
+				fprintf(stderr, "\n\t");
+		}
+		fprintf(stderr, "\n");
+	}
+	fd_bits = 1;	/* fin */
+	fd_dma = 0;
+	fd_status = 0;
+}
+
+static void fdc_dma_cmd_out_done(void)
+{
+	fd_bits = 2;	/* fout on */
+	fd_dma = 0;
+}
+
+static void fdc_write8(uint8_t data)
+{
+	if (trace & TRACE_FDC)
+		fprintf(stderr, "fdc write %02X\n", data);
+	switch(data) {
+	case 0x00:		/* Mystery - reset state perhaps ? */
+		break;
+	case 0x41:		/* used for reads */
+	case 0x43:		/* used for seek etc */
+		fd_bits = 2;	/* Fout not busy */
+		fd_ptr = 0;
+		fd_dma = 1;	/* Command in */
+		fd_status = 0x80;	/*??*/
+		break;
+	case 0x44:		/* seems to be reading the command buffer back */
+		fd_bits = 8;	/* busy */
+		fd_ptr = 0;
+		fd_dma = 3;
+		fd_status = 0x00;
+		break;
+	case 0x45:		/* data follow up */
+		fd_bits = 1;	/* ?? suspect this depends on the command */
+		fd_ptr = 0;
+		fd_dma = 2;	/* Data out ? */
+		fd_status = 0x00;	/* Seems to want top bit for error */
+		/* Fake an error on track 5 */
+		if (fdcmd[2] == 0x83 && fdcmd[3] == 0x05)
+			fd_status = 0x80;
+		break;
+	default:
+		fprintf(stderr, "%04X: unknown fdc cmd %02X.\n", cpu6_pc(), data);
+		break;
+	}
+}
+
+/*
+ *	The CMD disk interface is remarkably similar but at F808
+ *
+ *	Commands this time are sometimes written with the pattern
+ *
+ *	Wait !busy
+ *	41			}
+ *	DMA command		} sometimes 43 cmd
+ *	43
+ *	wait
+ *	check error
+ *	45
+ *	wait !busy
+ *	error check
+ *
+ *	Commands observed
+ *
+ *	Seek test:
+ *	81 00 84 10 83 XX XX FF
+ *
+ *	cycles down from 0336 to 0000, seems to use FFFF for park perhaps ?
+ *
+ *	Read test initial:
+ *	81 00 84 00 83 00 00 85 00 01 90 01 01 90 02 01
+ *	90 03 01 90 04 01 90 05 01 90 06 01 90 07 01 90
+ *	08 01 90 09 01 90 0A 01 90 0B 01 90 0C 01 90 0D
+ *	01 90 0E 01 90 0F 01 90 FF 00 00 00 00
+ */
+
+static uint8_t cmdcmd[256];
+static unsigned cmd_ptr;
+static unsigned cmd_dma;
+static uint8_t cmd_status;
+static uint8_t cmd_bits;
+
+static void cmd_dma_cmd_in(uint8_t data)
+{
+	if (cmd_ptr == 256) {
+		fprintf(stderr, "%04X: overlong cmdc command %02X\n", data, cpu6_pc());
+		return;
+	}
+	cmdcmd[cmd_ptr++] = data;
+}
+
+static uint8_t cmd_dma_cmd_out(void)
+{
+	if (cmd_ptr == 256) {
+		fprintf(stderr, "%04X: overlong cmdc command read\n", cpu6_pc());
+		return 0xFF;
+	}
+	return cmdcmd[cmd_ptr++];
+}
+
+static void cmd_dma_cmd_done(void)
+{
+	unsigned i;
+	if (trace & TRACE_CMD) {
+		fprintf(stderr, "cmdcmd: %d\n\t", cmd_ptr);
+		for (i = 0; i < cmd_ptr; i++) {
+			fprintf(stderr, "%02X ", cmdcmd[i]);
+			if (((i & 15) == 15) && i != cmd_ptr - 1)
+				fprintf(stderr, "\n\t");
+		}
+		fprintf(stderr, "\n");
+	}
+	cmd_bits = 1;	/* fin */
+	cmd_dma = 0;
+	cmd_status = 0;
+	cmd_ptr = 0;
+}
+
+static void cmd_dma_cmd_out_done(void)
+{
+	cmd_bits = 2;	/* fout on */
+	cmd_dma = 0;
+}
+
+/* Subtly different to the FDC or maybe the 41/43 divide is really the same
+   but driven / observed differently */
+
+static void cmd_write8(uint8_t data)
+{
+	if (trace & TRACE_CMD)
+		fprintf(stderr, "cmd write %02X\n", data);
+	switch(data) {
+	case 0x00:		/* Mystery - reset state perhaps ? */
+		cmd_bits = 1;	/* Fout not busy is expected */
+		break;
+	case 0x41:		/* 43 41 45 is sometimes a pattern. */
+		cmd_ptr = 0;
+		break;
+	case 0x43:		/* Run command ?? */
+		cmd_bits = 2;	/* Fout not busy */
+		cmd_ptr = 0;
+		cmd_dma = 1;	/* Command in */
+		cmd_status = 0x80;	/*??*/
+		break;
+	case 0x44:		/* seems to be reading the command buffer back */
+		cmd_bits = 8;	/* busy */
+		cmd_ptr = 0;
+		cmd_dma = 3;
+		cmd_status = 0x00;
+		break;
+	case 0x45:		/* data follow up */
+		cmd_bits = 1;	/* ?? suspect this depends on the command */
+		cmd_ptr = 0;
+		cmd_dma = 2;	/* Data out ? */
+		cmd_status = 0x00;	/* Seems to want top bit for error */
+		break;
+	default:
+		fprintf(stderr, "%04X: unknown cmd cmd %02X.\n", cpu6_pc(), data);
+		break;
+	}
+}
+
 static uint8_t io_read8(uint16_t addr)
 {
+	if (addr == 0xF800) {
+		if (trace & TRACE_FDC)
+			fprintf(stderr, "fd status %02X\n", fd_status);
+		return fd_status;
+	}
+	if (addr == 0xF801) {
+		if (trace & TRACE_FDC)
+			fprintf(stderr, "fd bits %02X\n", fd_bits);
+		return fd_bits;
+	}
+	if (addr == 0xF808) {
+		if (trace & TRACE_CMD)
+			fprintf(stderr, "cmd status %02X\n", cmd_status);
+		return cmd_status;
+	}
+	if (addr == 0xF809) {
+		if (trace & TRACE_CMD)
+			fprintf(stderr, "cmd bits %02X\n", cmd_bits);
+		return cmd_bits;
+	}
 	if (addr == 0xF110)
 		return switches;
 	if (addr >= 0xF140 && addr <= 0xF14F)
 		return hawk_read(addr);
 	if (addr >= 0xF200 && addr <= 0xF21F)
 		return mux_read(addr);
+	fprintf(stderr, "%04X: Unknown I/O read %04X\n", cpu6_pc(), addr);
 	return 0;
 }
 
 static void io_write8(uint16_t addr, uint8_t val)
 {
-	if (addr >= 0xF106 && addr <= 0xF110) {
+	if (addr == 0xF800) {
+		fdc_write8(val);
+		return;
+	} else if (addr == 0xF808) {
+		cmd_write8(val);
+		return;
+	} else if (addr >= 0xF106 && addr <= 0xF110) {
 		hexdisplay(addr, val);
 		return;
 	} else if (addr >= 0xF140 && addr <= 0xF14F) {
@@ -454,10 +806,38 @@ int main(int argc, char *argv[])
 
 	while (!emulator_done) {
 		cpu6_execute_one(trace & TRACE_CPU);
-		if (hawk_dma) {
+		if (hawk_dma == 1) {
 			if (dma_read_cycle(hawk_read_next()))
 				hawk_dma_done();
 		}
+		if (hawk_dma == 2) {
+			if (dma_write_active())
+				hawk_write_next(dma_write_cycle());
+			else
+				hawk_dma_done();
+		}
+		/* Floppy controller command host to controller */
+		if (fd_dma == 1) {
+			if (dma_write_active())
+				fdc_dma_cmd_in(dma_write_cycle());
+			else
+				fdc_dma_cmd_done();
+		}
+		if (fd_dma == 3) {
+			if (dma_read_cycle(fdc_dma_cmd_out()))
+				fdc_dma_cmd_out_done();
+		}
+		if (cmd_dma == 1) {
+			if (dma_write_active())
+				cmd_dma_cmd_in(dma_write_cycle());
+			else
+				cmd_dma_cmd_done();
+		}
+		if (cmd_dma == 3) {
+			if (dma_read_cycle(cmd_dma_cmd_out()))
+				cmd_dma_cmd_out_done();
+		}
+		usleep(1);
 	}
 	return 0;
 }
