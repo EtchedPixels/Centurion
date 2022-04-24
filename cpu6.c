@@ -366,7 +366,7 @@ static void sub_flags(uint8_t s, uint8_t d)
 	unsigned r = d - s;
 	alu_out &= ~(ALU_C | ALU_N | ALU_Z | ALU_V);
 	if (d == s)
-		alu_out |= ALU_C | ALU_Z;
+		alu_out |= /*ALU_C | */ALU_Z;
 	else if (d < s)
 		alu_out |= ALU_C;
 	/* Q: is this based on d < s or final sign ? */
@@ -527,9 +527,12 @@ static void shift_flags16(unsigned c, unsigned r)
  */
 static int inc(unsigned reg)
 {
-	unsigned r = reg_read(reg) + 1;
+	uint8_t r = reg_read(reg) + 1;
 	reg_write(reg, r);
-	flags(r);
+	alu_out &= ~(ALU_Z|ALU_V);
+	if (r == 0)
+		alu_out |= ALU_Z;
+	alu_out |= ALU_V;
 	return 0;
 }
 
@@ -540,9 +543,13 @@ static int inc(unsigned reg)
  */
 static int dec(unsigned reg)
 {
-	unsigned r = reg_read(reg) - 1;
+	uint8_t r = reg_read(reg) - 1;
 	reg_write(reg, r);
-	flags(r);
+	/* DEC seems to be special */
+	alu_out &= ~ALU_Z;
+	if (r == 0)
+		alu_out |= ALU_Z;
+	alu_out &= ~ALU_V;
 	return 0;
 }
 
@@ -688,17 +695,24 @@ static int mov(unsigned dst, unsigned src)
 
 static int inc16(unsigned reg)
 {
-	unsigned r = regpair_read(reg);
-	regpair_write(reg, r + 1);
-	arith_flags16(r + 1, r, 1);
+	uint16_t r = regpair_read(reg) + 1;
+	regpair_write(reg, r);
+	alu_out &= ~(ALU_Z|ALU_V);
+	if (r == 0)
+		alu_out |= ALU_Z;
+	alu_out |= ALU_V;
 	return 0;
 }
 
 static int dec16(unsigned reg)
 {
-	unsigned r = regpair_read(reg) - 1;
+	uint16_t r = regpair_read(reg) - 1;
 	regpair_write(reg, r);
-	flags16(r);
+	/* DEC seems to be special */
+	alu_out &= ~ALU_Z;
+	if (r == 0)
+		alu_out |= ALU_Z;
+	alu_out &= ~ALU_V;
 	return 0;
 }
 
@@ -971,6 +985,8 @@ static int branch_op(void)
 		break;
 	case 7:
 		t = nxorv();	/* < 0 */
+		if (alu_out & ALU_Z)
+			t = 1;
 		break;
 	case 8:		/* Jump if Result > 0 */
 		t = nxorv();
