@@ -21,3 +21,22 @@ the diagnostics ROM images.
 * Which registers map to which memory location
 * The various mystery instructions used in the CPU test and memory test
 
+## Compiling/Running
+
+### Prerequisites
+
+* Download ROM bin files from https://github.com/phire/centurion_isa/tree/main/roms<br>
+    ```bootstrap_unscrambled.bin```<br>
+	```Diag_F1_Rev_1.0.BIN```<br>
+	```Diag_F2_Rev_1.0.BIN```<br>
+	```Diag_F3_Rev_1.0.BIN```<br>
+	```Diag_F4_1133CMD.BIN```
+* Install C compiler with Make
+
+### Compiling
+
+* make
+
+### Running
+
+* For the Auxilary Tests Menu: ```./centurion -s 1 -S 13```
