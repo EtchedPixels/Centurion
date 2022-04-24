@@ -320,9 +320,9 @@ static void flags(unsigned r)
 static void ldflags(unsigned r)
 {
 	alu_out &= ~(ALU_N | ALU_Z | ALU_V);
-	alu_out |= ALU_V;
-	if (r & 0x80)
-		alu_out |= ALU_N;
+/*	alu_out |= ALU_V; */
+	if (!(r & 0x80))
+		alu_out |= ALU_V;
 	if (r == 0)
 		alu_out |= ALU_Z;
 }
@@ -424,8 +424,8 @@ static void ldflags16(unsigned r)
 {
 	alu_out &= ~(ALU_N | ALU_Z | ALU_V);
 	alu_out |= ALU_V;
-	if (r & 0x8000)
-		alu_out |= ALU_N;
+	if (!(r & 0x8000))
+		alu_out |= ALU_V;
 	if (r == 0)
 		alu_out |= ALU_Z;
 }
@@ -744,7 +744,7 @@ static int sll16(unsigned reg)
 {
 	uint16_t r = regpair_read(reg);
 	regpair_write(reg, r << 1);
-	shift_flags16((r & 0x8000), r << 1);
+	arith_flags16(r << 1, r, r);
 	return 0;
 }
 
