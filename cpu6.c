@@ -21,11 +21,14 @@
 
 #include "cpu6.h"
 
-static unsigned cpu_ipl = 0;
+static uint8_t cpu_ipl = 0;
 static uint16_t pc = 0xFC00;
 static uint8_t op;
 static uint8_t alu_out;
 static uint8_t switches = 0xF0;
+static uint8_t int_enable;
+static unsigned halted;
+static unsigned pending_ipl;
 
 #define BS1	0x01
 #define BS2	0x02
@@ -78,17 +81,16 @@ uint8_t dma_write_cycle(void)
 }
 
 /*
- *	We don't know of any more direct access to these as a register
- *	by some other means so our order is arbitrary. Given the 4 switches
- *	and the way Bxx is encoded it may be the switches make up a byte
- *	with this somewhere
+ *	We don't know how the flags are packed into C with the IPL
+ *	but they appear to live in the low 4 bits and the lv in the
+ *	low 4 bits of the upper byte
  */
 
-#define ALU_C	1
-#define ALU_N	2
-#define ALU_Z	4
-#define ALU_I	8
-#define ALU_V	16
+#define ALU_L	1
+#define ALU_M	2
+#define ALU_F	4
+#define ALU_V	8
+
 
 /*
  *	System memory access
@@ -290,308 +292,255 @@ static int mmu_op47(void)
 	fetch16();
 	fetch16();
 	if (b3 == 0x80)
-		alu_out |= ALU_Z;
+		alu_out |= ALU_V;
 	return 0;
 }
 
 /*
- *	ALU - logic should be close, but the flags are speculative.
- *
- *	This is implemented using AM2901 ALU slices in the real
- *	hardware. The ALU provides carry in and out but it doesn't
- *	appear the CPU has any 'with carry' instructions beyond internal
- *	carry and carry visibility.
- *
- *	We should however expect that the likely "flags" are going to be
- *	carry, zero, negative and overflow. Other candidates though might
- *	include AGT and LGT like the TI990.
+ *	Load flags
+ *	F not touched
+ *	L not touched
+ *	M cleared then set if MSB of operand
  */
-
-static void flags(unsigned r)
-{
-	alu_out &= ~ALU_Z;
-	if (r == 0)
-		alu_out |= ALU_Z;
-}
-
-/* Load seems to be implemented as "add to zero" */
-/* Unsure; carry */
-/* Could also be 'clears N sets V to top bit */
 static void ldflags(unsigned r)
 {
-	alu_out &= ~(ALU_N | ALU_Z | ALU_V);
-/*	alu_out |= ALU_V; */
-	if (!(r & 0x80))
+	alu_out &= ~(ALU_M | ALU_V);
+	if (r & 0x80)
+		alu_out |= ALU_M;
+	if ((r & 0xFF) == 0)
 		alu_out |= ALU_V;
-	if (r == 0)
-		alu_out |= ALU_Z;
 }
 
 /*
- *	Arithmetic changes C N V and Z. However the behaviour of SUB and ADD
- *	differ.
+ *	The docs simply say that F is set if the sign of the destination
+ *	register changes.
+ *
+ *	V - set according to value being zero or non zero
+ *	M - set on result being negative
+ *	F - set according to overflow rules
+ *
+ *	L is set only by add so done in add
  */
-static void arith_flags(unsigned r, uint8_t a, uint8_t b)
+static void arith_flags(unsigned r, uint8_t d)
 {
-	alu_out &= ~(ALU_C | ALU_N | ALU_Z | ALU_V);
-	if ((uint8_t) r == 0)
-		alu_out |= ALU_Z;
-	if (r & 0x100)
-		alu_out |= ALU_C;
-	/* If the result is negative but both inputs were positive then
-	   we overflowed */
-	if (r & 0x80) {
-		alu_out |= ALU_N;
-		if (!((a | b) & 0x80))
-			alu_out |= ALU_V;
-	} else {
-		/* If the result was positive but both inputs were negative
-		   we overflowed */
-		if (a & b & 0x80)
-			alu_out |= ALU_V;
-	}
-
+	alu_out &= ~(ALU_F | ALU_M | ALU_V);
+	if ((r & 0xFF) == 0)
+		alu_out |= ALU_V;
+	if (r & 0x80)
+		alu_out |= ALU_M;
+	if ((r ^ d) & 0x80)
+		alu_out |= ALU_V;
 }
 
 /*
- *	For D-S
- *	
- *	D = S		C  !N  Z
- *	D < S		C   N !Z
- *	D > S		!C !N !Z
- *	
+ *	Subtract is similar but the overflow rule probably differs and
+ *	L is a borrow not a carry
  */
-static void sub_flags(uint8_t s, uint8_t d)
+static void sub_flags(uint8_t r, uint8_t d)
 {
-	unsigned r = d - s;
-	alu_out &= ~(ALU_C | ALU_N | ALU_Z | ALU_V);
-	if (d == s)
-		alu_out |= /*ALU_C | */ALU_Z;
-	else if (d < s)
-		alu_out |= ALU_C;
-	/* Q: is this based on d < s or final sign ? */
-	if (r & 0x100)
-		alu_out |= ALU_N;
-
-	/* For subtraction the V rule is different */
-	if (d & 0x80) {
-		if (!((s | r) & 0x80))
-			alu_out |= ALU_V;
-	} else {
-		if (s & r & 0x80)
-			alu_out |= ALU_V;
-	}
+	alu_out &= ~(ALU_F | ALU_M | ALU_V);
+	if ((r & 0xFF) == 0)
+		alu_out |= ALU_V;
+	if (r & 0x80)
+		alu_out |= ALU_M;
+	if ((r ^ d) & 0x80)
+		alu_out |= ALU_F;
 }
 
 /*
- *	Logic changes only the Z flag
+ *	Logical operations
+ *	M is set if there is a 1 in the MSB of the source register
+ *	   (or dest register for double register ops)
+ *		TODO: before or after operation ?
  */
 static void logic_flags(unsigned r)
 {
-	if (r == 0)
-		alu_out |= ALU_Z;
-	else
-		alu_out &= ~ALU_Z;
+	alu_out &= ~(ALU_M | ALU_V);
+	if (r & 0x80)
+		alu_out |= ALU_M;
+	if (!(r & 0xFF))
+		alu_out |= ALU_V;
 }
 
 /*
- *	This is less clear. We are pretty sure about the C flag, not entirely
- *	sure it affects Z (but it would be an oddity if it did not). The
- *	behaviour of N is quite a mystery.
+ *	Shift
+ *	L is the bit shfited out
+ *	M is set as with logic
+ *	V is set if result is zero
+ *	Left shift/rotate: F is xor of L and M after shift
  *
- *	One possibility is that SLL at least is implemented as an ADC x,x
  */
 static void shift_flags(unsigned c, unsigned r)
 {
-	alu_out &= ~(ALU_C | ALU_N | ALU_Z);
-	if (r == 0)
-		alu_out |= ALU_Z;
+	alu_out &= ~(ALU_L | ALU_M | ALU_V);
+	if ((r & 0xFFFF) == 0)
+		alu_out |= ALU_V;
 	if (c)
-		alu_out |= ALU_C;
-	if (r & 0x80)
-		alu_out |= ALU_N;
+		alu_out |= ALU_L;
+	if (r & 0x8000)
+		alu_out |= ALU_M;
 }
 
-static void flags16(unsigned r)
-{
-	alu_out &= ~ALU_Z;
-	if (r == 0)
-		alu_out |= ALU_Z;
-}
-
-/* Load seems to be implemented as "add to zero" */
+/*
+ *	Load flags
+ *	F not touched
+ *	L not touched
+ *	M cleared then set if MSB of operand
+ */
 static void ldflags16(unsigned r)
 {
-	alu_out &= ~(ALU_N | ALU_Z | ALU_V);
-	alu_out |= ALU_V;
-	if (!(r & 0x8000))
+	alu_out &= ~(ALU_M | ALU_V);
+	if (r & 0x8000)
+		alu_out |= ALU_M;
+	if ((r & 0xFFFF) == 0)
 		alu_out |= ALU_V;
-	if (r == 0)
-		alu_out |= ALU_Z;
 }
 
 /*
- *	Arithmetic changes C N and Z. However the behaviour of SUB and ADD
- *	differ so this needs work.
+ *	The docs simply say that F is set if the sign of the destination
+ *	register changes.
+ *
+ *	V - set according to value being zero or non zero
+ *	M - set on result being negative
+ *	F - set according to overflow rules
+ *
+ *	L is set only by add so done in add
  */
-static void arith_flags16(unsigned r, uint16_t a, uint16_t b)
+static void arith_flags16(unsigned r, uint16_t d)
 {
-	alu_out &= ~(ALU_C | ALU_N | ALU_Z | ALU_V);
-	if ((uint16_t) r == 0)
-		alu_out |= ALU_Z;
-	if (r & 0x10000)
-		alu_out |= ALU_C;
-
+	alu_out &= ~(ALU_F | ALU_M | ALU_V);
+	if ((r & 0xFFFF) == 0)
+		alu_out |= ALU_V;
+	if (r & 0x8000)
+		alu_out |= ALU_M;
 	/* If the result is negative but both inputs were positive then
 	   we overflowed */
-	if (r & 0x8000) {
-		alu_out |= ALU_N;
-		if (!((a | b) & 0x8000))
-			alu_out |= ALU_V;
-	} else {
-		/* If the result was positive but both inputs were negative
-		   we overflowed */
-		if (a & b & 0x8000)
-			alu_out |= ALU_V;
-	}
-
+	if ((r ^ d) & 0x8000)
+		alu_out |= ALU_F;
 }
 
 /*
- *	This one is a bit odd
- *
- *	For D-S
- *	
- *	D = S		C  !N  Z
- *	D < S		C   N !Z
- *	D > S		!C !N !Z
- *	
+ *	Subtract is similar but the overflow rule probably differs and
+ *	L is a borrow not a carry
  */
-static void sub_flags16(uint16_t s, uint16_t d)
+static void sub_flags16(uint16_t r, uint16_t d)
 {
-	unsigned r = d - s;
-	alu_out &= ~(ALU_C | ALU_N | ALU_Z | ALU_V);
-	if (d == s)
-		alu_out |= ALU_C | ALU_Z;
-	else if (d < s)
-		alu_out |= ALU_C;
-	/* Q: is this based on d < s or final sign ? */
-	if (r & 0x10000)
-		alu_out |= ALU_N;
-	/* For subtraction the V rule is different */
-	if (d & 0x8000) {
-		if (!((s | r) & 0x8000))
-			alu_out |= ALU_V;
-	} else {
-		if (s & r & 0x8000)
-			alu_out |= ALU_V;
-	}
+	alu_out &= ~(ALU_F | ALU_M | ALU_V);
+	if ((r & 0xFFFF) == 0)
+		alu_out |= ALU_V;
+	if (r & 0x8000)
+		alu_out |= ALU_M;
+	if ((r ^ d) & 0x8000)
+		alu_out |= ALU_F;
 }
 
 /*
- *	Logic changes only the Z flag
+ *	Logical operations
+ *	M is set if there is a 1 in the MSB of the source register
+ *	   (or dest register for double register ops)
+ *		TODO: before or after operation ?
  */
 static void logic_flags16(unsigned r)
 {
-	if (r == 0)
-		alu_out |= ALU_Z;
-	else
-		alu_out &= ~ALU_Z;
+	alu_out &= ~(ALU_M | ALU_V);
+	if (r & 0x8000)
+		alu_out |= ALU_M;
+	if (!(r & 0xFFFF))
+		alu_out |= ALU_V;
 }
 
 /*
- *	This is less clear. We are pretty sure about the C flag, not entirely
- *	sure it affects Z (but it would be an oddity if it did not). The
- *	behaviour of N is quite a mystery.
+ *	Shift
+ *	C is the bit shfited out
+ *	M is set as with logic
+ *	V is set if result is zero
+ *	Left shift/rotate: F is xor of L and M after shift
  *
- *	One possibility is that SLL at least is implemented as an ADC x,x
  */
 static void shift_flags16(unsigned c, unsigned r)
 {
-	alu_out &= ~(ALU_C | ALU_N | ALU_Z);
-	if (r == 0)
-		alu_out |= ALU_Z;
+	alu_out &= ~(ALU_L | ALU_M | ALU_V);
+	if ((r & 0xFFFF) == 0)
+		alu_out |= ALU_V;
 	if (c)
-		alu_out |= ALU_C;
+		alu_out |= ALU_L;
 	if (r & 0x8000)
-		alu_out |= ALU_N;
+		alu_out |= ALU_M;
 }
 
+
 /*
- *	An inc from 0 to 1 is tested and C and N stay 0 but Z is changed
- *	An inc from 0xFF to 0x00 is tested and either clears C and N or
- *	leaves them unchanged but does change Z. The same test sequence
- *	is run for 16bit and appears consistent with 8. A later test
- *	starts with N set and inc FE to FF clears N. Same for 8bit. The
- *	later test sequence does FFFC inc x 4 and expects C but N clear.
+ *	Arithmetic flag but not link
  */
 static int inc(unsigned reg)
 {
-	uint8_t r = reg_read(reg) + 1;
-	reg_write(reg, r);
-	alu_out &= ~(ALU_Z|ALU_V);
-	if (r == 0)
-		alu_out |= ALU_Z;
-	alu_out |= ALU_V;
+	uint8_t r = reg_read(reg);
+	reg_write(reg, r + 1);
+	arith_flags(r + 1, r);
 	return 0;
 }
 
 /*
- * 	A DEC through FF->0 does not set C or N. This is confirmed by
- *	the self tests. Z is however set (confirmed by the diag rom)
- *	and maybe V
+ *	Does not affect L either
  */
 static int dec(unsigned reg)
 {
-	uint8_t r = reg_read(reg) - 1;
-	reg_write(reg, r);
-	/* DEC seems to be special */
-	alu_out &= ~ALU_Z;
-	if (r == 0)
-		alu_out |= ALU_Z;
-	alu_out &= ~ALU_V;
+	uint8_t r = reg_read(reg);
+	reg_write(reg, r - 1);
+	sub_flags(r - 1, r);
 	return 0;
 }
 
 static int clr(unsigned reg)
 {
-	/* CLR is tested to clear C and N and set Z. As it's in with the ALU
-	   ops presumably it's implemented through the ALU. It also seems to
-	   clear V */
 	reg_write(reg, 0);
-	arith_flags(0, 0, 0);
+	alu_out &= ~(ALU_F|ALU_L|ALU_M);
+	alu_out |= ALU_V;
 	return 0;
 }
 
-/* The self test appears to check that not only affects Z */
+/*
+ *	Sets all the flags but rule not clear
+ */
 static int not(unsigned reg)
 {
 	uint8_t r = ~reg_read(reg);
 	reg_write(reg, r);
-	flags(r);
+	logic_flags(r);
 	return 0;
 }
 
 /*
  *	The CPU test checks that SRL FF sets C and expects N to be clear
  */
-static int srl(unsigned reg)
+static int sra(unsigned reg)
 {
+	uint8_t v;
 	uint8_t r = reg_read(reg);
-	reg_write(reg, r >> 1);
-	shift_flags(r & 1, r >> 1);
+	v = r >> 1;
+	if (v & 0x40)
+		v |= 0x80;
+	reg_write(reg, v);
+	shift_flags(r & 1, v);
 	return 0;
 }
 
 /*
- *	An SLL of 7F to FF sets N and clears C. In the test it seems all
- *	the tested cases set N.. Mystery TODO
+ *	Left shifts also play with F
  */
 static int sll(unsigned reg)
 {
 	uint8_t r = reg_read(reg);
 	reg_write(reg, r << 1);
 	shift_flags((r & 0x80), r << 1);
+	alu_out &= ~ALU_F;
+	/* So annoying C lacks a ^^ operator */
+	switch(alu_out & (ALU_L | ALU_M)) {
+	case ALU_L:
+	case ALU_M:
+		alu_out |= ALU_F;
+		break;
+	}
 	return 0;
 }
 
@@ -604,7 +553,7 @@ static int rrc(unsigned reg)
 	uint8_t c = r & 1;
 
 	r >>= 1;
-	r |= (alu_out & ALU_C) ? 0x80 : 0;
+	r |= (alu_out & ALU_L) ? 0x80 : 0;
 
 	reg_write(reg, r);
 	shift_flags(c, r);
@@ -618,45 +567,56 @@ static int rlc(unsigned reg)
 	uint8_t c = r & 0x80;
 
 	r <<= 1;
-	r |= (alu_out & ALU_C) ? 1 : 0;
+	r |= (alu_out & ALU_L) ? 1 : 0;
 
 	reg_write(reg, r);
 	shift_flags(c, r);
+
+	alu_out &= ~ALU_F;
+	/* So annoying C lacks a ^^ operator */
+	switch(alu_out & (ALU_L | ALU_M)) {
+	case ALU_L:
+	case ALU_M:
+		alu_out |= ALU_F;
+		break;
+	}
+
 	return 0;
 }
 
 /*
- *	Add changes N and C (0x8000 + 0x0x7FFF clears N and C). It also appears
- *	to change Z.
+ *	Add changes all the flags so fix up L
  */
 static int add(unsigned dst, unsigned src)
 {
-	uint16_t r = reg_read(dst) + reg_read(src);
+	uint16_t d = reg_read(dst);
+	uint16_t r = d + reg_read(src);
 	reg_write(dst, r);
-	arith_flags(r, dst, src);
+	arith_flags(r, d);
+	alu_out &= ~ALU_L;
+	if (r & 0x100)
+		alu_out |= ALU_L;
 	return 0;
 }
 
 /*
- *	Subtract is apparently done via an invert add and inc because
- *	we test that SUB of 0xAA - 0xAA sets C and Z, and seems to clear N
- *
- *	We also know that 0x0001 - 0x8000 sets N and C so C is not a borrow.
+ *	Subtract changes all the flags
  */
 static int sub(unsigned dst, unsigned src)
 {
 	unsigned s = reg_read(src);
 	unsigned d = reg_read(dst);
 	unsigned r = d - s;
-//	fprintf(stderr, "D %X - S %X = %X\n", d, s, r);
 	reg_write(dst, r);
-	sub_flags(s, d);
+	sub_flags(s - d, d);
+	alu_out &= ~ALU_L;
+	if (d < s)
+		alu_out |= ALU_L;
 	return 0;
 }
 
 /*
- *	Logic operations do not affect C or N. There is an explicit test for
- *	this in both directions in the CPU diagnostic tests. Z is affected.
+ *	Logic operations
  */
 static int and(unsigned dst, unsigned src)
 {
@@ -686,7 +646,7 @@ static int mov(unsigned dst, unsigned src)
 {
 	uint8_t r = reg_read(src);
 	reg_write(dst, r);
-	flags(r);
+	logic_flags(r);
 	return 0;
 }
 
@@ -695,24 +655,17 @@ static int mov(unsigned dst, unsigned src)
 
 static int inc16(unsigned reg)
 {
-	uint16_t r = regpair_read(reg) + 1;
-	regpair_write(reg, r);
-	alu_out &= ~(ALU_Z|ALU_V);
-	if (r == 0)
-		alu_out |= ALU_Z;
-	alu_out |= ALU_V;
+	uint16_t r = regpair_read(reg);
+	regpair_write(reg, r + 1);
+	arith_flags16(r + 1, r);
 	return 0;
 }
 
 static int dec16(unsigned reg)
 {
-	uint16_t r = regpair_read(reg) - 1;
-	regpair_write(reg, r);
-	/* DEC seems to be special */
-	alu_out &= ~ALU_Z;
-	if (r == 0)
-		alu_out |= ALU_Z;
-	alu_out &= ~ALU_V;
+	uint16_t r = regpair_read(reg);
+	regpair_write(reg, r - 1);
+	sub_flags16(r - 1, r);
 	return 0;
 }
 
@@ -720,7 +673,8 @@ static int dec16(unsigned reg)
 static int clr16(unsigned reg)
 {
 	regpair_write(reg, 0);
-	arith_flags16(0, 0, 0);
+	alu_out &= ~(ALU_F|ALU_L|ALU_M);
+	alu_out |= ALU_V;
 	return 0;
 }
 
@@ -728,15 +682,19 @@ static int not16(unsigned reg)
 {
 	uint16_t r = ~regpair_read(reg);
 	regpair_write(reg, r);
-	flags16(r);
+	logic_flags16(r);
 	return 0;
 }
 
-static int srl16(unsigned reg)
+static int sra16(unsigned reg)
 {
+	uint16_t v;
 	uint16_t r = regpair_read(reg);
-	regpair_write(reg, r >> 1);
-	shift_flags16(r & 1, r >> 1);
+	v = r >> 1;
+	if (v & 0x4000)
+		v |= 0x8000;
+	regpair_write(reg, v);
+	shift_flags16(r & 1, v);
 	return 0;
 }
 
@@ -744,7 +702,15 @@ static int sll16(unsigned reg)
 {
 	uint16_t r = regpair_read(reg);
 	regpair_write(reg, r << 1);
-	arith_flags16(r << 1, r, r);
+	shift_flags16((r & 0x8000), r << 1);
+	alu_out &= ~ALU_F;
+	/* So annoying C lacks a ^^ operator */
+	switch(alu_out & (ALU_L | ALU_M)) {
+	case ALU_L:
+	case ALU_M:
+		alu_out |= ALU_F;
+		break;
+	}
 	return 0;
 }
 
@@ -754,7 +720,7 @@ static int rrc16(unsigned reg)
 	uint16_t c = r & 1;
 
 	r >>= 1;
-	r |= (alu_out & ALU_C) ? 0x8000 : 0;
+	r |= (alu_out & ALU_L) ? 0x8000 : 0;
 
 	regpair_write(reg, r);
 	shift_flags16(c, r);
@@ -767,18 +733,31 @@ static int rlc16(unsigned reg)
 	uint16_t c = r & 0x8000;
 
 	r <<= 1;
-	r |= (alu_out & ALU_C) ? 1 : 0;
+	r |= (alu_out & ALU_L) ? 1 : 0;
 
 	regpair_write(reg, r);
 	shift_flags16(c, r);
+	alu_out &= ~ALU_F;
+	/* So annoying C lacks a ^^ operator */
+	switch(alu_out & (ALU_L | ALU_M)) {
+	case ALU_L:
+	case ALU_M:
+		alu_out |= ALU_F;
+		break;
+	}
+
 	return 0;
 }
 
 static int add16(unsigned dst, unsigned src)
 {
-	unsigned r = regpair_read(dst) + regpair_read(src);
+	unsigned d = regpair_read(dst);
+	unsigned r = d + regpair_read(src);
 	regpair_write(dst, r);
-	arith_flags16(r, dst, src);
+	arith_flags16(r, d);
+	alu_out &= ~ALU_L;
+	if (r & 0x10000)
+		alu_out |= ALU_L;
 	return 0;
 }
 
@@ -788,7 +767,10 @@ static int sub16(unsigned dst, unsigned src)
 	unsigned d = regpair_read(dst);
 	unsigned r = d - s;
 	regpair_write(dst, r);
-	sub_flags16(s, d);
+	sub_flags16(s - d, d);
+	alu_out &= ~ALU_L;
+	if (d < s)
+		alu_out |= ALU_L;
 	return 0;
 }
 
@@ -820,7 +802,7 @@ static int mov16(unsigned dst, unsigned src)
 {
 	uint16_t r = regpair_read(src);
 	regpair_write(dst, r);
-	ldflags16(r);
+	logic_flags16(r);
 	return 0;
 }
 
@@ -842,23 +824,29 @@ static uint16_t indexed_address(unsigned size)
 			idx, pc);
 	if (idx & 0x08)
 		offset = fetch();
-	switch (idx & 0x07) {
+	switch (idx & 0x03) {
 	case 0:
-		return regpair_read(r) + offset;
+		addr = regpair_read(r) + offset;
+		break;
 	case 1:
 		addr = regpair_read(r);
 		regpair_write(r, addr + size);
-		return addr + offset;
+		addr = addr + offset;
+		break;
 	case 2:
 		addr = regpair_read(r);
 		addr -= size;
 		regpair_write(r, addr);
-		return addr + offset;
+		addr =  addr + offset;
+		break;
 	default:
 		fprintf(stderr, "Unknown indexing mode %02X at %04X\n",
 			idx, pc);
 		exit(1);
 	}
+	if (idx & 0x04)
+		addr = mem_read16(addr);
+	return addr;
 }
 
 static uint16_t decode_address(unsigned size, unsigned mode)
@@ -935,85 +923,59 @@ static uint16_t decode_address(unsigned size, unsigned mode)
  *	8757	uses 18 taken if B - A >= 0 (!N !Z)
  */
 
-static int nxorv(void)
-{
-	if ((alu_out & (ALU_N | ALU_V)) == 0)
-		return 0;
-	if ((alu_out & (ALU_N | ALU_V)) == (ALU_N | ALU_V))
-		return 0;
-	return 1;
-}
-
 static int branch_op(void)
 {
 	unsigned t;
 	int8_t off;
 
 	switch (op & 0x0F) {
-	case 0:		/* bcs */
-		t = (alu_out & ALU_C);
+	case 0:		/* BL	Branch if link is set */
+		t = (alu_out & ALU_L);
 		break;
-	case 1:		/* bcc */
-		t = !(alu_out & ALU_C);
+	case 1:		/* BNL	Branch if link is not set */
+		t = !(alu_out & ALU_L);
 		break;
-		/* Question: is this a sign or arithmetic overflow in fact - ie is
-		   it an N or V ? */
-	case 2:		/* bns */
-		t = (alu_out & ALU_N);
+	case 2:		/* BF 	Branch if fault is set */
+		t = (alu_out & ALU_F);
 		break;
-	case 3:		/* bnc */
-		t = !(alu_out & ALU_N);
+	case 3:		/* BNF	Branch if fault is not set */
+		t = !(alu_out & ALU_F);
 		break;
-	case 4:		/* bz   - known right */
-		t = (alu_out & ALU_Z);
+	case 4:		/* BZ	Branch if zero */
+		t = (alu_out & ALU_V);
 		break;
-	case 5:		/* bnz - known right */
-		t = !(alu_out & ALU_Z);
+	case 5:		/* BNZ	Branch if non zero */
+		t = !(alu_out & ALU_V);
 		break;
-		/*
-		 *      The classic operators are
-		 *      >=              Z | N ^ V = 0
-		 *      > 0             N ^ V = 0
-		 *      <=0             Z | N^V = 1
-		 *      < 0             N ^ V = 1
-		 *
-		 */
-	case 6:		/* Branch if result was > 0 */
-		t = !nxorv();	/* >= 0 */
-		if (alu_out & ALU_Z)	/* but not on zero */
-			t = 0;
+	case 6:		/* BM	Branch if minus */
+		t = alu_out & ALU_M;
 		break;
-	case 7:
-		t = nxorv();	/* < 0 */
-		if (alu_out & ALU_Z)
-			t = 1;
+	case 7:		/* BP	Branch if plus */
+		t = !(alu_out & ALU_M);
 		break;
-	case 8:		/* Jump if Result > 0 */
-		t = nxorv();
-		if (alu_out & ALU_Z)
-			t = 0;
+	case 8:		/* BGZ	Branch if greater than zero */
+		/* Branch if both M and V are zero */
+		t = !(alu_out & (ALU_M | ALU_V));
 		break;
-	case 9:		/* Taken if Z or negative */
-		t = alu_out & ALU_Z;
-		if (!nxorv())
-			t = 1;
+	case 9:		/* BLE	Branch if less than or equal to zero */
+		t = alu_out & (ALU_M | ALU_V);
 		break;
-		/* Switches */
-	case 10:
+	case 10:	/* BS1  */
 		t = (switches & BS1);
 		break;
-	case 11:
+	case 11:	/* BS2 */
 		t = (switches & BS2);
 		break;
-	case 12:
+	case 12:	/* BS3 */
 		t = (switches & BS3);
 		break;
-	case 13:
+	case 13:	/* BS4 */
 		t = (switches & BS4);
 		break;
-	case 14:
-	case 15:
-		fprintf(stderr, "Unknown branch %02X at %04X\n", op, pc);
+	case 14:	/* BTM - branch on teletype mark - CPU4 only ? */
+		t = 0;
+		break;
+	case 15:	/* BEP - branch on even parity - CPU4 only ? */
 		t = 0;
 		break;
 	}
@@ -1025,52 +987,82 @@ static int branch_op(void)
 	return 0;
 }
 
+/* Some of this is not clear */
+static void reactivate_pri(void)
+{
+	/* Save flags */
+	uint16_t c = regpair_read(C);
+	c &= 0x0F;
+	c |= alu_out;
+	regpair_write(C, c);
+	/* Saved IPL */
+	cpu_ipl = (c >> 8) & 0x0F;
+	pc = regpair_read(P);
+	alu_out = regpair_read(C) & 0x0F;
+}
+
 /* Low operations - not all known */
 static int low_op(void)
 {
 	switch (op) {
 	case 0x00:		/* HALT */
-		halt_system();
+		halted = 1;
 		break;
 	case 0x01:		/* NOP */
 		break;
-	case 0x02:		/* FSN */
-		alu_out |= ALU_N;
+	case 0x02:		/* SF	Set Fault */
+		alu_out |= ALU_F;
 		break;
-	case 0x03:		/* FCN */
-		alu_out &= ~ALU_N;
+	case 0x03:		/* RF	Reset Fault */
+		alu_out &= ~ALU_F;
 		break;
-	case 0x04:		/* FSI *//* Interrupt flag */
-		alu_out |= ALU_I;
+	case 0x04:		/* EI	Enable Interrupts */
+		int_enable = 1;
 		break;
-	case 0x05:		/* FCI */
-		alu_out &= ~ALU_I;
+	case 0x05:		/* DI	Disable Interrupts */
+		int_enable = 0;
 		break;
-	case 0x06:		/* FSC */
-		alu_out |= ALU_C;
+	case 0x06:		/* SL	Set Link */
+		alu_out |= ALU_L;
 		break;
-	case 0x07:		/* FCC */
-		alu_out &= ~ALU_C;
+	case 0x07:		/* RL	Clear Link */
+		alu_out &= ~ALU_L;
 		break;
-	case 0x08:		/* FCA */
-		alu_out ^= ALU_C;
+	case 0x08:		/* CL	Complement Link */
+		alu_out ^= ALU_L;
 		break;
-	case 0x09:		/* RET */
-		/* RET - see notes on call */
+	case 0x09:		/* RSR	Return from subroutine */
 		pc = regpair_read(X);
 		regpair_write(X, pop());
 		break;
-	case 0x0A:		/* RETI if C  ? */
-		/* C seems to influence reti, mux test on int 6 does
-		  fsc reti if processed, reti if not.. */
+	case 0x0A:		/* RI	Return from interrupt */
+		/* This may differ a bit on the CPU6 seems to have a carry
+		   involvement */
+		regpair_write(P, pc);
+	case 0x0B:		/* RIM	Return from interrupt modified */
+		reactivate_pri();
 		break;
+	case 0x0C:
+		/* EE200 historical ? - enable link to teletype */
+		break;
+	case 0x0D:
+		/* No flag effects */
+		regpair_write(X, pc);
+		break;
+	/*
+	 * "..0x0E ought to be a long (but not infinite) loop.
+	 *  The delay opcode 0x0E should 4.5ms long.  I do not know how the
+	 *  CPU5 & CPU6 handles the 0E but in the CPU4 it stopped the system
+	 *  clock for the full 4.5ms, it even stopped the DMA channel for the
+	 *  4.5ms which caused problems if you happened to be in the middle of
+	 *  a disk R/W operation because the disk drive did not stop spinning
+	 *  so disk data got screwed up."
+	 *		-- Ken Romain
+	 */
 	case 0x0E:		/* DELAY */
 		break;
-	case 0x0B:
-	case 0x0C:
-	case 0x0D:
-		fprintf(stderr, "Unknown op %02X at %04X\n", op, pc);
 	case 0x0F:
+		/* CPU6 specific ? */
 		/* 0F is used in the MMU RAM test - some kind of reti
 		   variant used to flip ipl during the testing or maybe
 		   a syscall style ret */
@@ -1147,12 +1139,8 @@ static int move_op(void)
 	/* Seem to be some strange gaps here */
 	if (op == 0x0C || op == 0x1C)
 		return mmu_loadop(op);
-	if (op & 0x11) {
-		fprintf(stderr,
-			"Unknown reg encoding %02X for 16bit move at %04X\n",
-			op, pc);
-		exit(1);
-	}
+	/* Guesswork at this point */
+	fprintf(stderr, "Unknown 0x2E op %02X at %04X\n", op, pc);
 	mov16(op >> 5, (op & 0x0F) >> 1);
 	return 0;
 }
@@ -1172,36 +1160,22 @@ static int jump_op(void)
 {
 	uint16_t new_pc;
 	if (op == 0x76) {	/* syscall is a mystery */
+		uint8_t old_ip = cpu_ipl;
 		cpu_ipl = 15;
+		/* Unclear if this also occurs */
+		reg_write(CH, old_ipl);
 		return 0;
 	}
-	switch (op & 7) {
-	case 1:		/* Immediate */
-		new_pc = fetch16();
-		break;
-	case 2:		/* Jump to contents of address given */
-		new_pc = mem_read16(fetch16());
-		break;
-	case 3:
-		new_pc = (int8_t) fetch() + pc;	/* TODO: signed or unsigned */
-		break;
-	case 4:		/* Jump to contents of address given indirected */
-		/* This one is a guess - we've not seen it */
-		new_pc = mem_read16(mem_read16(fetch16()));
-		break;
-	case 5:
-		new_pc = fetch() + regpair_read(A);	/* Again signed ? */
-		break;
-	default:
-		fprintf(stderr, "Invalid jump/call 0x%02X at 0x%04X\n", op,
-			pc);
-		return 0;
-	}
+	/* We don't know what 0x70 does (it's invalid but I'd guess it jumps
+	   to the following byte */
+	new_pc = decode_address(2, op & 0x07);
 	if (op & 0x08) {
 		/* guesswork time. 8500 implies it is not a simple branch and link */
 		/* the use of rt+ implies it's also not pc stacking, so try old X stacking */
 		push(regpair_read(X));
 		regpair_write(X, pc);
+		/* This is specifically stated in the EE200 manual */
+		regpair_write(P, new_pc);
 	}
 	pc = new_pc;
 	return 0;
@@ -1215,14 +1189,17 @@ static int jump_op(void)
  */
 static int rt_op(void)
 {
+	/* Valid modes 0-5 */
 	uint16_t addr = decode_address(2, op & 7);
 	uint16_t r;
 	if (op & 0x08) {
 		r = regpair_read(X);
 		mem_write16(addr, r);
+		/* FIXME: FLAGS */
 	} else {
 		r = mem_read16(addr);
 		regpair_write(X, r);
+		/* FIXME: FLAGS */
 	}
 	return 0;
 }
@@ -1264,6 +1241,7 @@ static int storebyte_op(void)
 		r = reg_read(AL);
 
 	mem_write8(addr, r);
+	ldflags(r);
 	return 0;
 }
 
@@ -1278,17 +1256,11 @@ static int storeword_op(void)
 		r = regpair_read(A);
 
 	mem_write16(addr, r);
+	ldflags16(r);
 
 	return 0;
 }
 
-/*
- *	In the CPU test we verify that LD to AL or BL does not affect C
- *	but we do check that Z is set if 0 is loaded.
- *
- *	Elsewhere we rely upon N changing and V being set
- *
- */
 static int loadstore_op(void)
 {
 	switch (op & 0x30) {
@@ -1314,7 +1286,7 @@ static int misc2x_special(uint8_t reg)
 	   or what */
 	if (op == 0x22 && reg == 0x32) {
 		/* CPU ID ?? */
-		alu_out ^= ALU_Z;
+		alu_out ^= ALU_V;
 		return 0;
 	}
 	fprintf(stderr, "Unknown misc2x special %02X:%02X at %04X\n", op,
@@ -1342,7 +1314,7 @@ static int misc2x_op(void)
 	case 0x23:
 		return not(reg);
 	case 0x24:
-		return srl(reg);
+		return sra(reg);
 	case 0x25:
 		return sll(reg);
 	case 0x26:
@@ -1358,9 +1330,11 @@ static int misc2x_op(void)
 	case 0x2B:
 		return not(AL);
 	case 0x2C:
-		return srl(AL);
+		return sra(AL);
 	case 0x2D:
 		return sll(AL);
+	/* On CPU 4 these would be inc XL/dec XL but they are not present and
+	   X is almost always handled as a 16bit register only */
 	case 0x2E:
 		return move_op();
 	case 0x2F:
@@ -1399,7 +1373,7 @@ static int misc3x_op(void)
 	case 0x33:
 		return not16(reg);
 	case 0x34:
-		return srl16(reg);
+		return sra16(reg);
 	case 0x35:
 		return sll16(reg);
 	case 0x36:
@@ -1415,10 +1389,10 @@ static int misc3x_op(void)
 	case 0x3B:
 		return not16(A);
 	case 0x3C:
-		return srl16(A);
+		return sra16(A);
 	case 0x3D:
 		return sll16(A);
-	case 0x3E:		/* To check */
+	case 0x3E:
 		return inc16(X);
 	case 0x3F:
 		return dec16(X);
@@ -1548,21 +1522,41 @@ static char *flagcode(void)
 {
 	static char buf[6];
 	strcpy(buf, "-----");
-	if (alu_out & ALU_C)
-		*buf = 'C';
-	if (alu_out & ALU_I)
-		buf[1] = 'I';
-	if (alu_out & ALU_N)
-		buf[2] = 'N';
-	if (alu_out & ALU_Z)
-		buf[3] = 'Z';
+	if (alu_out & ALU_F)
+		*buf = 'F';
+	if (alu_out & ALU_L)
+		buf[2] = 'L';
+	if (alu_out & ALU_M)
+		buf[3] = 'M';
 	if (alu_out & ALU_V)
 		buf[4] = 'V';
 	return buf;
 }
 
+void cpu6_interrupt(unsigned trace)
+{
+	unsigned old_ipl;
+
+	if (int_enable == 0)
+		return;
+	if (pending_ipl > cpu_ipl) {
+		old_ipl = cpu_ipl;
+		halted = 0;
+		regpair_write(P, pc);
+		reg_write(CL, alu_out);
+		cpu_ipl = pending_ipl;
+		reg_write(CH, old_ipl);
+		pc = regpair_read(P);
+		alu_out = reg_read(CL);
+		if (trace)
+			fprintf(stderr, "Interrupt %X: New PC = %04X, previous IPL %X\n",
+				cpu_ipl, pc, old_ipl);
+	}
+}
+
 unsigned cpu6_execute_one(unsigned trace)
 {
+	cpu6_interrupt(trace);
 	if (trace)
 		fprintf(stderr, "CPU %04X: ", pc);
 	op = fetch();

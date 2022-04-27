@@ -16,6 +16,8 @@
 
 #include "cpu6.h"
 
+static unsigned finch;		/* Finch or original FDC */
+
 volatile unsigned int emulator_done;
 
 #define TRACE_MEM	1
@@ -181,7 +183,7 @@ static uint8_t mux_read(uint16_t addr)
 }
 
 /*
- *	Hawk disk controller
+ *	CDC 9427H Hawk disk controller
  *	F140	unit select
  *	F141	}
  *	F142	}	C/H/S of some format
@@ -303,6 +305,12 @@ static void hawk_dma_done(void)
  *	 the DMA was setup to move in /out of DRAM. "
  *			-- Ken Romain
  *
+ *	"For the longest time the OPSYS minimum disk file size was 16 sectors
+ *	 for 400 bytes ( being one logical disk track and also one physical
+ *	 track on the CDC 9427H Hawk drive). When we had large soft sector
+ *	 drives like the 9448 Phoenix we still kept the 400 byte logical
+ *	 sector length and padded the sector to 512 bytes."
+ *			-- Ken Romain
  */
 static void hawk_cmd(uint8_t cmd)
 {
@@ -327,6 +335,7 @@ static void hawk_cmd(uint8_t cmd)
 		hawk_status = 0;
 		hawk_busy = 0;
 		break;
+	case 4: /* Format sector - Ken thinks but not sure */
 	default:
 		fprintf(stderr, "%04X: Unknown hawk command %02X\n",
 			cpu6_pc(), cmd);
@@ -392,6 +401,11 @@ static uint8_t hawk_read(uint16_t addr)
  *	 the Read / Write data in or out of the controller under DMA control."
  *			-- Ken Romain
  *
+ *	"The first floopy was 8 inch. All Centurion disk R/W are based on
+ *	 400 ( 0x190 ) byte sectors to keep the old software from the Sykes
+ *	 tape days still usable on the disk drive systems."
+ *			-- Ken Romain
+ *
  *	Write 43 to F800 to load a command
  *	Write 45 to enable data receive (needed even if no data)
  *	F801 is the in/out/busy bits, F800 the status where top bit = error
@@ -414,50 +428,156 @@ static uint8_t hawk_read(uint16_t addr)
  *	81 00 84 0F+unit 83 00 00 85 00 0190 01 0190 02 0190 ...
  */
 
-static uint8_t fdcmd[256];
+#define ST_Fout		1
+#define ST_Fin		2
+#define ST_Busy		8
+
+static uint8_t fd_buf[0x1000];
 static unsigned fd_ptr;
 static unsigned fd_dma;
 static uint8_t fd_status;
 static uint8_t fd_bits;
 
-static void fdc_dma_cmd_in(uint8_t data)
+/* Assume ptr is a shared counter - but we don't actually know from
+   what we have so far */
+
+static void fdc_dma_in(uint8_t data)
 {
-	if (fd_ptr == 256) {
-		fprintf(stderr, "%04X: overlong fdc command %02X\n", data, cpu6_pc());
+	if (fd_ptr >= 0x1000) {
+		fprintf(stderr, "%04X: overlong fdc data %02X\n", data, cpu6_pc());
 		return;
 	}
-	fdcmd[fd_ptr++] = data;
+	fd_buf[fd_ptr++] = data;
 }
 
-static uint8_t fdc_dma_cmd_out(void)
+static uint8_t fdc_dma_out(void)
 {
-	if (fd_ptr == 256) {
+	if (fd_ptr >= 0x1000) {
 		fprintf(stderr, "%04X: overlong fdc command read\n", cpu6_pc());
 		return 0xFF;
 	}
-	return fdcmd[fd_ptr++];
+	return fd_buf[fd_ptr++];
 }
 
-static void fdc_dma_cmd_done(void)
+static void fdc_command_execute(uint8_t *p, int len)
+{
+	while(len-- > 0) {
+		switch(*p++) {
+		case 0x81:
+			p++;	/* We don't know what this does */
+			len--;
+			break;
+		case 0x82:
+			fprintf(stderr, "restore.\n");
+			break;
+		case 0x83:
+			fprintf(stderr, "seek %d\n", *p++);
+			len--;
+			break;
+		case 0x84:
+			fprintf(stderr, "set unit %d\n", *p++);
+			len--;
+			break;
+		case 0x85:
+			fprintf(stderr, "set head %d\n", *p++);
+			len--;
+		case 0x88:
+			fprintf(stderr, "read %d,%d for %d bytes.\n",
+				*p, p[1], p[2] << 8 | p[3]);
+			p += 4;
+			len -= 4;
+			break;
+		default:
+			fprintf(stderr, "unknown command %02x\n", p[-1]);
+			break;
+		}
+	}
+}
+
+/*
+ *	The finch is a lot smarter
+ *
+ *	"A later rev. of the floppy controller (AMD2901 based) controlled
+ *	 5-1/4 floppy (720KB) and CDC 5-1/4 Finch 24MB or 32MB hard drive,
+ *	 letting us build a desktop Centurion Micro Plus system with CPU6,
+ *	 128KB DRAM & 4 port MUX"
+ *
+ *	81 02 is now used (is this maybe a version check ?)
+ *	82 is still restore
+ *	83 takes two bytes and it's not clear what it seeks
+ *	84 seems to be set unit
+ *	85 possibly set head (as hard disk)
+ *	8A is a table driven read, given tuples of sector, length
+ *	   terminated FF
+ *	FF is a terminator - in fact several test commands appear to DMA
+ *			     over length blocks and rely on this.
+ *
+ */
+static void finch_command_execute(uint8_t *p, int len)
+{
+	while(len-- > 0) {
+		switch(*p++) {
+		case 0x81:
+			p++;	/* We don't know what this does */
+			len--;
+			break;
+		case 0x82:
+			fprintf(stderr, "restore.\n");
+			break;
+		case 0x83:
+			fprintf(stderr, "seek %d\n", *p <<8 | p[1]);
+			p += 2;
+			len-=2;
+			break;
+		case 0x84:
+			fprintf(stderr, "set unit %d\n", *p++);
+			len--;
+			break;
+		case 0x85:
+			fprintf(stderr, "set head %d\n", *p++);
+			len--;
+		case 0x8A:
+			/* Table driven read */
+			while(*p != 0xFF) {
+				fprintf(stderr, "read %d for %d bytes.\n",
+				*p,  p[1] << 8 | p[2]);
+				p += 3;
+				len -= 3;
+			}
+			break;
+		case 0xFF:	/* Seems to act as an end marker */
+			break;
+		default:
+			fprintf(stderr, "unknown command %02x\n", p[-1]);
+			break;
+		}
+	}
+}
+
+static void fdc_dma_in_done(void)
 {
 	unsigned i;
-	if (trace & TRACE_FDC) {
+	if (fd_ptr > 0x0F00 && (trace & TRACE_FDC)) {
 		fprintf(stderr, "fdcmd: %d\n\t", fd_ptr);
-		for (i = 0; i < fd_ptr; i++) {
-			fprintf(stderr, "%02X ", fdcmd[i]);
+		for (i = 0x0F00; i < fd_ptr; i++) {
+			fprintf(stderr, "%02X ", fd_buf[i]);
 			if (((i & 15) == 15) && i != fd_ptr - 1)
 				fprintf(stderr, "\n\t");
 		}
+		if (!finch)
+			fdc_command_execute(fd_buf + 0x0F00, fd_ptr - 0x0F01);
+		else
+			finch_command_execute(fd_buf + 0x0F00, fd_ptr - 0x0F01);
 		fprintf(stderr, "\n");
 	}
-	fd_bits = 1;	/* fin */
+	fd_bits = ST_Fout;
 	fd_dma = 0;
 	fd_status = 0;
 }
 
-static void fdc_dma_cmd_out_done(void)
+static void fdc_dma_out_done(void)
 {
-	fd_bits = 2;	/* fout on */
+	fd_bits = ST_Fout;
 	fd_dma = 0;
 }
 
@@ -467,28 +587,43 @@ static void fdc_write8(uint8_t data)
 		fprintf(stderr, "fdc write %02X\n", data);
 	switch(data) {
 	case 0x00:		/* Mystery - reset state perhaps ? */
+	case 0x01:		/* Used in the aux memory test */
+	case 0x0F:		/* Used in the aux memory test */
+		/* Status bits ?? */
 		break;
 	case 0x41:		/* used for reads */
 	case 0x43:		/* used for seek etc */
-		fd_bits = 2;	/* Fout not busy */
-		fd_ptr = 0;
+		fd_bits = ST_Fin;	/* Fin not busy */
+		fd_ptr = 0x0F00;
 		fd_dma = 1;	/* Command in */
 		fd_status = 0x80;	/*??*/
 		break;
 	case 0x44:		/* seems to be reading the command buffer back */
-		fd_bits = 8;	/* busy */
-		fd_ptr = 0;
-		fd_dma = 3;
+		fd_bits = ST_Busy|ST_Fout;	/* busy */
+		fd_ptr = 0x0F00;
+		fd_dma = 2;
 		fd_status = 0x00;
 		break;
 	case 0x45:		/* data follow up */
-		fd_bits = 1;	/* ?? suspect this depends on the command */
+		/* Should probably have ST_Busy set at this point ? */
+		/* 1 or 2 ?? */
+		fd_bits = ST_Fin|ST_Busy;	/* Should this be Fout or command based ? */
 		fd_ptr = 0;
 		fd_dma = 2;	/* Data out ? */
 		fd_status = 0x00;	/* Seems to want top bit for error */
 		/* Fake an error on track 5 */
-		if (fdcmd[2] == 0x83 && fdcmd[3] == 0x05)
+		if (fd_buf[0x0F02] == 0x83 && fd_buf[0x0F03] == 0x05)
 			fd_status = 0x80;
+		break;
+	case 0x46:		/* load data into aux memory */
+		fd_bits = ST_Fin;
+		fd_ptr = 0;
+		fd_dma = 1;
+		break;
+	case 0x47:		/* retrieve data from aux memory */
+		fd_bits = ST_Fout|ST_Busy;
+		fd_ptr = 0;
+		fd_dma = 2;
 		break;
 	default:
 		fprintf(stderr, "%04X: unknown fdc cmd %02X.\n", cpu6_pc(), data);
@@ -523,6 +658,17 @@ static void fdc_write8(uint8_t data)
  *	90 03 01 90 04 01 90 05 01 90 06 01 90 07 01 90
  *	08 01 90 09 01 90 0A 01 90 0B 01 90 0C 01 90 0D
  *	01 90 0E 01 90 0F 01 90 FF 00 00 00 00
+ *
+ *	The CMD with the Finch card follows the Finch pattern instead
+ *
+ *	81 00
+ *	82
+ *	83 seek (seems it might be little endian or some mix of track/head)
+ *	84 set unit 0-F (Finch floppy uses 10-1F)
+ *	85 sector length.w repeating until 0xFF
+ *	(differs from the FD which seems to use 85 has head and 8A as
+ *	the table driven read)
+ *	FF terminator (FF 00 ?)
  */
 
 static uint8_t cmdcmd[256];
@@ -561,7 +707,7 @@ static void cmd_dma_cmd_done(void)
 		}
 		fprintf(stderr, "\n");
 	}
-	cmd_bits = 1;	/* fin */
+	cmd_bits = ST_Fout;	/* fin */
 	cmd_dma = 0;
 	cmd_status = 0;
 	cmd_ptr = 0;
@@ -569,7 +715,7 @@ static void cmd_dma_cmd_done(void)
 
 static void cmd_dma_cmd_out_done(void)
 {
-	cmd_bits = 2;	/* fout on */
+	cmd_bits = ST_Fout;	/* fin on */
 	cmd_dma = 0;
 }
 
@@ -582,28 +728,40 @@ static void cmd_write8(uint8_t data)
 		fprintf(stderr, "cmd write %02X\n", data);
 	switch(data) {
 	case 0x00:		/* Mystery - reset state perhaps ? */
-		cmd_bits = 1;	/* Fout not busy is expected */
+		cmd_bits = ST_Fout;	/* Fout not busy is expected */
 		break;
+	case 0x01:		/* Used in the aux memory test */
+	case 0x0F:		/* Used in the aux memory test */
 	case 0x41:		/* 43 41 45 is sometimes a pattern. */
 		cmd_ptr = 0;
 		break;
 	case 0x43:		/* Run command ?? */
-		cmd_bits = 2;	/* Fout not busy */
+		cmd_bits = ST_Fin;	/* Fout not busy */
 		cmd_ptr = 0;
 		cmd_dma = 1;	/* Command in */
 		cmd_status = 0x80;	/*??*/
 		break;
 	case 0x44:		/* seems to be reading the command buffer back */
-		cmd_bits = 8;	/* busy */
+		cmd_bits = ST_Busy|ST_Fout;	/* busy */
 		cmd_ptr = 0;
 		cmd_dma = 3;
 		cmd_status = 0x00;
 		break;
 	case 0x45:		/* data follow up */
-		cmd_bits = 1;	/* ?? suspect this depends on the command */
+		cmd_bits = ST_Fout;	/* ?? suspect this depends on the command */
 		cmd_ptr = 0;
 		cmd_dma = 2;	/* Data out ? */
 		cmd_status = 0x00;	/* Seems to want top bit for error */
+		break;
+	case 0x46:		/* load data into aux memory */
+		fd_bits = ST_Fin;
+		fd_ptr = 0;
+		fd_dma = 1;
+		break;
+	case 0x47:		/* retrieve data from aux memory */
+		fd_bits = ST_Fout|ST_Busy;
+		fd_ptr = 0;
+		fd_dma = 2;
 		break;
 	default:
 		fprintf(stderr, "%04X: unknown cmd cmd %02X.\n", cpu6_pc(), data);
@@ -761,7 +919,7 @@ void usage(void)
 int main(int argc, char *argv[])
 {
 	int opt;
-	while ((opt = getopt(argc, argv, "d:s:S:")) != -1) {
+	while ((opt = getopt(argc, argv, "d:s:S:F")) != -1) {
 		switch (opt) {
 		case 'd':
 			trace = atoi(optarg);
@@ -773,6 +931,9 @@ int main(int argc, char *argv[])
 		case 'S':
 			/* Diag switches */
 			switches = atoi(optarg);
+			break;
+		case 'F':
+			finch = 1;
 			break;
 		default:
 			usage();
@@ -819,13 +980,13 @@ int main(int argc, char *argv[])
 		/* Floppy controller command host to controller */
 		if (fd_dma == 1) {
 			if (dma_write_active())
-				fdc_dma_cmd_in(dma_write_cycle());
+				fdc_dma_in(dma_write_cycle());
 			else
-				fdc_dma_cmd_done();
+				fdc_dma_in_done();
 		}
-		if (fd_dma == 3) {
-			if (dma_read_cycle(fdc_dma_cmd_out()))
-				fdc_dma_cmd_out_done();
+		if (fd_dma == 2) {
+			if (dma_read_cycle(fdc_dma_out()))
+				fdc_dma_out_done();
 		}
 		if (cmd_dma == 1) {
 			if (dma_write_active())

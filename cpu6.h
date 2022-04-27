@@ -11,10 +11,10 @@
 #define ZL		9
 #define SH		10
 #define SL		11
-#define GH		12
-#define GL		13
-#define PCL		14
-#define PCH		15
+#define CH		12
+#define CL		13
+#define PH		14
+#define PL		15
 
 #define A		0
 #define B		1
@@ -22,8 +22,8 @@
 #define Y		3
 #define Z		4
 #define S		5	/* Just a convention it seems */
-#define GX		6	/* Flags ? */
-#define PC		7	/* PC */
+#define C		6	/* Flags ? */
+#define P		7	/* PC */
 
 extern uint8_t mem_read8(uint16_t addr);
 extern void mem_write8(uint16_t addr, uint8_t val);
