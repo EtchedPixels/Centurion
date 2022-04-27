@@ -17,13 +17,13 @@
 #define PL		15
 
 #define A		0
-#define B		1
-#define X		2
-#define Y		3
-#define Z		4
-#define S		5	/* Just a convention it seems */
-#define C		6	/* Flags ? */
-#define P		7	/* PC */
+#define B		2
+#define X		4
+#define Y		6
+#define Z		8
+#define S		10	/* Just a convention it seems */
+#define C		12	/* Flags ? */
+#define P		14	/* PC */
 
 extern uint8_t mem_read8(uint16_t addr);
 extern void mem_write8(uint16_t addr, uint8_t val);

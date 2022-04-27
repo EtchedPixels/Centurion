@@ -151,9 +151,6 @@ uint16_t fetch16(void)
 	return r;
 }
 
-/* We don't know the true mapping between the registers and the
-   memory yet */
-
 static uint8_t reg_read(uint8_t r)
 {
 	return mem_read8((cpu_ipl << 4) | r);
@@ -164,27 +161,30 @@ static void reg_write(uint8_t r, uint8_t v)
 	mem_write8((cpu_ipl << 4) | r, v);
 }
 
+/*
+ *	This needs some updating if CPU6 behaves like CPU4. On the EE200
+ *	a word register specified with an odd value gives you the upper byte
+ *	twice (ie the logic is an or of 1 for the second access).
+ */
 static uint16_t regpair_read(uint8_t r)
 {
-	if (r > 7) {
-		fprintf(stderr, "Bad regpair encoding %02X %04X\n", op,
+	if (r > 15) {
+		fprintf(stderr, "Bad regpair encoding %02X %02X %04X\n", op, r,
 			pc);
 		exit(1);
 	}
-	r <<= 1;
-	return (reg_read(r) << 8) | reg_read(r + 1);
+	return (reg_read(r) << 8) | reg_read(r | 1);
 }
 
 static void regpair_write(uint8_t r, uint16_t v)
 {
-	if (r > 7) {
+	if (r > 15) {
 		fprintf(stderr, "Bad regpair encoding %02X %04X\n", op,
 			pc);
 		exit(1);
 	}
-	r <<= 1;
 	reg_write(r, v >> 8);
-	reg_write(r + 1, v);
+	reg_write(r | 1, v);
 }
 
 /*
@@ -814,14 +814,10 @@ static int mov16(unsigned dst, unsigned src)
 static uint16_t indexed_address(unsigned size)
 {
 	uint8_t idx = fetch();
-	unsigned r = idx >> 5;	/* No idea what happens if low bit set */
+	unsigned r = idx >> 4;
 	unsigned addr;
 	int8_t offset = 0;	/* Signed or not ? */
 
-	if (idx & 0x10)
-		fprintf(stderr,
-			"indexed address with reg low bit %02X at %04X\n",
-			idx, pc);
 	if (idx & 0x08)
 		offset = fetch();
 	switch (idx & 0x03) {
@@ -890,7 +886,7 @@ static uint16_t decode_address(unsigned size, unsigned mode)
 		break;
 	default:
 		/* indexed off a register */
-		addr = regpair_read(mode & 7);
+		addr = regpair_read((mode & 7) << 1);
 		indir = 0;
 		break;
 	}
@@ -1098,16 +1094,16 @@ static int dma_op(void)
 
 	switch (op & 0x0F) {
 	case 0:
-		dma_addr = regpair_read(rp >> 1);
+		dma_addr = regpair_read(rp);
 		break;
 	case 1:
-		regpair_write(rp >> 1, dma_addr);
+		regpair_write(rp, dma_addr);
 		break;
 	case 2:
-		dma_count = regpair_read(rp >> 1);
+		dma_count = regpair_read(rp);
 		break;
 	case 3:
-		regpair_write(rp >> 1, dma_count);
+		regpair_write(rp, dma_count);
 		break;
 	case 4:
 		dma_mode = rp;
@@ -1141,7 +1137,7 @@ static int move_op(void)
 		return mmu_loadop(op);
 	/* Guesswork at this point */
 	fprintf(stderr, "Unknown 0x2E op %02X at %04X\n", op, pc);
-	mov16(op >> 5, (op & 0x0F) >> 1);
+	mov16(op >> 4, op & 0x0F);
 	return 0;
 }
 
@@ -1160,7 +1156,7 @@ static int jump_op(void)
 {
 	uint16_t new_pc;
 	if (op == 0x76) {	/* syscall is a mystery */
-		uint8_t old_ip = cpu_ipl;
+		uint8_t old_ipl = cpu_ipl;
 		cpu_ipl = 15;
 		/* Unclear if this also occurs */
 		reg_write(CH, old_ipl);
@@ -1354,13 +1350,6 @@ static int misc3x_op(void)
 		if (reg & 0x0F)
 			return misc2x_special(reg);
 		reg >>= 4;
-		if (reg & 1) {
-			fprintf(stderr,
-				"Unknown misc3x reg encoding %02X at %04X\n",
-				reg, pc);
-			exit(1);
-		}
-		reg >>= 1;
 	}
 
 	switch (op) {
@@ -1467,8 +1456,6 @@ static int alu5x_op(void)
 		}
 		src = dst >> 4;
 		dst &= 0x0F;
-		src >>= 1;
-		dst >>= 1;
 	}
 	switch (op) {
 	case 0x50:		/* add */
