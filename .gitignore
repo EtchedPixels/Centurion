@@ -1,0 +1,5 @@
+*.o
+centurion
+*.bin
+*.BIN
+*.disk
