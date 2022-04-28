@@ -513,74 +513,89 @@ static int not(unsigned reg)
 /*
  *	The CPU test checks that SRL FF sets C and expects N to be clear
  */
-static int sra(unsigned reg)
+static int sra(unsigned reg, unsigned count)
 {
 	uint8_t v;
 	uint8_t r = reg_read(reg);
-	v = r >> 1;
-	if (v & 0x40)
-		v |= 0x80;
+
+	while(count--) {
+		v = r >> 1;
+		if (v & 0x40)
+			v |= 0x80;
+		shift_flags(r & 1, v);
+		r = v;
+	}
 	reg_write(reg, v);
-	shift_flags(r & 1, v);
 	return 0;
 }
 
 /*
  *	Left shifts also play with F
  */
-static int sll(unsigned reg)
+static int sll(unsigned reg, unsigned count)
 {
 	uint8_t r = reg_read(reg);
-	reg_write(reg, r << 1);
-	shift_flags((r & 0x80), r << 1);
-	alu_out &= ~ALU_F;
-	/* So annoying C lacks a ^^ operator */
-	switch(alu_out & (ALU_L | ALU_M)) {
-	case ALU_L:
-	case ALU_M:
-		alu_out |= ALU_F;
-		break;
+	uint8_t v;
+
+	while(count--) {
+		v = r << 1;
+		shift_flags((r & 0x80), v);
+		alu_out &= ~ALU_F;
+		/* So annoying C lacks a ^^ operator */
+		switch(alu_out & (ALU_L | ALU_M)) {
+		case ALU_L:
+		case ALU_M:
+			alu_out |= ALU_F;
+			break;
+		}
+		r = v;
 	}
+	reg_write(reg, v);
 	return 0;
 }
 
 /* The CPU test checks that an RR with the low bit set propogates carry. It
    also checks that FF shift to 7F leaves n clear. The hex digit conversion
    confirms that the rotates are 9bit rotate through carry */
-static int rrc(unsigned reg)
+static int rrc(unsigned reg, unsigned count)
 {
 	uint8_t r = reg_read(reg);
-	uint8_t c = r & 1;
+	uint8_t c;
 
-	r >>= 1;
-	r |= (alu_out & ALU_L) ? 0x80 : 0;
+	while(count--) {
+		c = r & 1;
 
+		r >>= 1;
+		r |= (alu_out & ALU_L) ? 0x80 : 0;
+
+		shift_flags(c, r);
+	}
 	reg_write(reg, r);
-	shift_flags(c, r);
 	return 0;
 }
 
 /* An RL of FF sets C but either clears N or leaves it clear */
-static int rlc(unsigned reg)
+static int rlc(unsigned reg, unsigned count)
 {
 	uint8_t r = reg_read(reg);
-	uint8_t c = r & 0x80;
+	uint8_t c;
 
-	r <<= 1;
-	r |= (alu_out & ALU_L) ? 1 : 0;
+	while(count--) {
+		c = r & 0x80;
+		r <<= 1;
+		r |= (alu_out & ALU_L) ? 1 : 0;
 
-	reg_write(reg, r);
-	shift_flags(c, r);
-
-	alu_out &= ~ALU_F;
-	/* So annoying C lacks a ^^ operator */
-	switch(alu_out & (ALU_L | ALU_M)) {
-	case ALU_L:
-	case ALU_M:
-		alu_out |= ALU_F;
-		break;
+		shift_flags(c, r);
+		alu_out &= ~ALU_F;
+		/* So annoying C lacks a ^^ operator */
+		switch(alu_out & (ALU_L | ALU_M)) {
+		case ALU_L:
+		case ALU_M:
+			alu_out |= ALU_F;
+			break;
+		}
 	}
-
+	reg_write(reg, r);
 	return 0;
 }
 
@@ -686,66 +701,83 @@ static int not16(unsigned reg)
 	return 0;
 }
 
-static int sra16(unsigned reg)
+static int sra16(unsigned reg, unsigned count)
 {
 	uint16_t v;
 	uint16_t r = regpair_read(reg);
-	v = r >> 1;
-	if (v & 0x4000)
-		v |= 0x8000;
-	regpair_write(reg, v);
-	shift_flags16(r & 1, v);
-	return 0;
-}
 
-static int sll16(unsigned reg)
-{
-	uint16_t r = regpair_read(reg);
-	regpair_write(reg, r << 1);
-	shift_flags16((r & 0x8000), r << 1);
-	alu_out &= ~ALU_F;
-	/* So annoying C lacks a ^^ operator */
-	switch(alu_out & (ALU_L | ALU_M)) {
-	case ALU_L:
-	case ALU_M:
-		alu_out |= ALU_F;
-		break;
+	while(count--) {
+		v = r >> 1;
+		if (v & 0x4000)
+			v |= 0x8000;
+		shift_flags16(r & 1, v);
+		r = v;
 	}
+	regpair_write(reg, r);
 	return 0;
 }
 
-static int rrc16(unsigned reg)
+static int sll16(unsigned reg, unsigned count)
 {
+	uint16_t v;
 	uint16_t r = regpair_read(reg);
-	uint16_t c = r & 1;
 
-	r >>= 1;
-	r |= (alu_out & ALU_L) ? 0x8000 : 0;
-
-	regpair_write(reg, r);
-	shift_flags16(c, r);
-	return 0;
-}
-
-static int rlc16(unsigned reg)
-{
-	uint16_t r = regpair_read(reg);
-	uint16_t c = r & 0x8000;
-
-	r <<= 1;
-	r |= (alu_out & ALU_L) ? 1 : 0;
-
-	regpair_write(reg, r);
-	shift_flags16(c, r);
-	alu_out &= ~ALU_F;
-	/* So annoying C lacks a ^^ operator */
-	switch(alu_out & (ALU_L | ALU_M)) {
-	case ALU_L:
-	case ALU_M:
-		alu_out |= ALU_F;
-		break;
+	while(count--) {
+		v = r << 1;
+		shift_flags16((r & 0x8000), v);
+		alu_out &= ~ALU_F;
+		/* So annoying C lacks a ^^ operator */
+		switch(alu_out & (ALU_L | ALU_M)) {
+		case ALU_L:
+		case ALU_M:
+			alu_out |= ALU_F;
+			break;
+		}
+		r = v;
 	}
+	regpair_write(reg, r);
+	return 0;
+}
 
+static int rrc16(unsigned reg, unsigned count)
+{
+	uint16_t r = regpair_read(reg);
+	uint16_t c;
+
+	while(count--) {
+		c= r & 1;
+
+		r >>= 1;
+		r |= (alu_out & ALU_L) ? 0x8000 : 0;
+
+		shift_flags16(c, r);
+	}
+	regpair_write(reg, r);
+	return 0;
+}
+
+static int rlc16(unsigned reg, unsigned count)
+{
+	uint16_t r = regpair_read(reg);
+	uint16_t c;
+
+	while(count--) {
+		c = r & 0x8000;
+
+		r <<= 1;
+		r |= (alu_out & ALU_L) ? 1 : 0;
+
+		shift_flags16(c, r);
+		alu_out &= ~ALU_F;
+		/* So annoying C lacks a ^^ operator */
+		switch(alu_out & (ALU_L | ALU_M)) {
+		case ALU_L:
+		case ALU_M:
+			alu_out |= ALU_F;
+			break;
+		}
+	}
+	regpair_write(reg, r);
 	return 0;
 }
 
@@ -1292,10 +1324,13 @@ static int misc2x_special(uint8_t reg)
 
 static int misc2x_op(void)
 {
+	unsigned count = 1;
 	unsigned reg = AL;
 	if (!(op & 8)) {
 		reg = fetch();
-		if (reg & 0x0F)
+		count = (reg & 0x0F) + 1;
+		/* Hack until we understand what 22 32 is about */
+		if (op == 0x22 && (reg & 0x0F))
 			return misc2x_special(reg);
 		reg >>= 4;
 	}
@@ -1310,13 +1345,13 @@ static int misc2x_op(void)
 	case 0x23:
 		return not(reg);
 	case 0x24:
-		return sra(reg);
+		return sra(reg, count);
 	case 0x25:
-		return sll(reg);
+		return sll(reg, count);
 	case 0x26:
-		return rrc(reg);
+		return rrc(reg, count);
 	case 0x27:
-		return rlc(reg);
+		return rlc(reg, count);
 	case 0x28:
 		return inc(AL);
 	case 0x29:
@@ -1326,9 +1361,9 @@ static int misc2x_op(void)
 	case 0x2B:
 		return not(AL);
 	case 0x2C:
-		return sra(AL);
+		return sra(AL, 1);
 	case 0x2D:
-		return sll(AL);
+		return sll(AL, 1);
 	/* On CPU 4 these would be inc XL/dec XL but they are not present and
 	   X is almost always handled as a 16bit register only */
 	case 0x2E:
@@ -1344,11 +1379,11 @@ static int misc2x_op(void)
 /* Like misc2x but word */
 static int misc3x_op(void)
 {
+	unsigned count  = 0;
 	unsigned reg = A;
 	if (!(op & 8)) {
 		reg = fetch();
-		if (reg & 0x0F)
-			return misc2x_special(reg);
+		count = (reg & 0x0F) + 1;
 		reg >>= 4;
 	}
 
@@ -1362,13 +1397,13 @@ static int misc3x_op(void)
 	case 0x33:
 		return not16(reg);
 	case 0x34:
-		return sra16(reg);
+		return sra16(reg, count);
 	case 0x35:
-		return sll16(reg);
+		return sll16(reg, count);
 	case 0x36:
-		return rrc16(reg);
+		return rrc16(reg, count);
 	case 0x37:
-		return rlc16(reg);
+		return rlc16(reg, count);
 	case 0x38:
 		return inc16(A);
 	case 0x39:
@@ -1378,9 +1413,9 @@ static int misc3x_op(void)
 	case 0x3B:
 		return not16(A);
 	case 0x3C:
-		return sra16(A);
+		return sra16(A, 1);
 	case 0x3D:
-		return sll16(A);
+		return sll16(A, 1);
 	case 0x3E:
 		return inc16(X);
 	case 0x3F:
