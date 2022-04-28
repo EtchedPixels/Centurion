@@ -164,7 +164,7 @@ static void reg_write(uint8_t r, uint8_t v)
 /*
  *	This needs some updating if CPU6 behaves like CPU4. On the EE200
  *	a word register specified with an odd value gives you the upper byte
- *	twice (ie the logic is an or of 1 for the second access).
+ *	twice.
  */
 static uint16_t regpair_read(uint8_t r)
 {
@@ -173,7 +173,7 @@ static uint16_t regpair_read(uint8_t r)
 			pc);
 		exit(1);
 	}
-	return (reg_read(r) << 8) | reg_read(r | 1);
+	return (reg_read((r | 1)^ 1) << 8) | reg_read((r ^ 1));
 }
 
 static void regpair_write(uint8_t r, uint16_t v)
@@ -183,8 +183,8 @@ static void regpair_write(uint8_t r, uint16_t v)
 			pc);
 		exit(1);
 	}
-	reg_write(r, v >> 8);
-	reg_write(r | 1, v);
+	reg_write((r | 1) ^ 1 , v >> 8);
+	reg_write((r ^ 1), v);
 }
 
 /*
