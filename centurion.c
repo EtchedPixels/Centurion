@@ -11,6 +11,8 @@
 #include <signal.h>
 #include <termios.h>
 #include <sys/select.h>
+#include <sys/socket.h>
+#include <arpa/inet.h>
 #include <unistd.h>
 #include <fcntl.h>
 
@@ -30,6 +32,11 @@ unsigned int trace = 0;
 
 unsigned int switches;
 
+static int in_fd = 0;
+static int out_fd = 1;
+static int sock_fd;
+static int max_fd = 2;
+
 /* Utility functions for the mux */
 static unsigned int check_chario(void)
 {
@@ -38,33 +45,45 @@ static unsigned int check_chario(void)
 	unsigned int r = 0;
 
 	FD_ZERO(&i);
-	FD_SET(0, &i);
+	FD_SET(in_fd, &i);
 	FD_ZERO(&o);
-	FD_SET(1, &o);
+	FD_SET(out_fd, &o);
 	tv.tv_sec = 0;
 	tv.tv_usec = 0;
 
-	if (select(2, &i, NULL, NULL, &tv) == -1) {
+	if (select(max_fd, &i, &o, NULL, &tv) == -1) {
 		if (errno == EINTR)
 			return 0;
 		perror("select");
 		exit(1);
 	}
-	if (FD_ISSET(0, &i))
+	if (FD_ISSET(in_fd, &i))
 		r |= 1;
-	if (FD_ISSET(1, &o))
+	if (FD_ISSET(out_fd, &o))
 		r |= 2;
 	return r;
 }
 
 static unsigned int next_char(void)
 {
-	char c;
-	if (read(0, &c, 1) != 1) {
-		fprintf(stderr, "(tty read without ready byte)\n");
-		return 0xFF;
+	static unsigned char lastc = 0xFF;
+	int r;
+
+	r = read(in_fd, &lastc, 1);
+
+	if (r == 0) {
+		emulator_done = 1;
+		return lastc;
 	}
-	return c;
+
+	if (r < 0) {
+		/* Someone read the port when nothing there */
+		if (errno == EAGAIN || errno == EWOULDBLOCK)
+			return lastc;
+		perror("next_char");
+		exit(1);
+	}
+	return lastc;
 }
 
 static uint8_t mem[65536];
@@ -148,13 +167,18 @@ static void mux_write(uint16_t addr, uint8_t val)
 	if (mux != 0)
 		return;
 
-	val &= 0x7F;
-	if (val != 0x0A && val != 0x0D
-	    && (val < 0x20 || val == 0x7F))
-		printf("[%02X]", val);
-	else
-		putchar(val);
-	fflush(stdout);
+	if (out_fd) {
+		val &= 0x7F;
+		write(out_fd, &val, 1);
+	} else {
+		val &= 0x7F;
+		if (val != 0x0A && val != 0x0D
+		    && (val < 0x20 || val == 0x7F))
+			printf("[%02X]", val);
+		else
+			putchar(val);
+		fflush(stdout);
+	}
 }
 
 static uint8_t mux_read(uint16_t addr)
@@ -890,6 +914,56 @@ static void exit_cleanup(void)
 	tcsetattr(0, TCSADRAIN, &saved_term);
 }
 
+static void tty_init(void)
+{
+	if (tcgetattr(0, &term) == 0) {
+		saved_term = term;
+		atexit(exit_cleanup);
+		signal(SIGINT, cleanup);
+		signal(SIGQUIT, cleanup);
+		signal(SIGPIPE, cleanup);
+		term.c_lflag &= ~(ICANON | ECHO);
+		term.c_cc[VMIN] = 0;
+		term.c_cc[VTIME] = 1;
+		term.c_cc[VINTR] = 0;
+		term.c_cc[VSUSP] = 0;
+		term.c_cc[VSTOP] = 0;
+		tcsetattr(0, TCSADRAIN, &term);
+	}
+}
+
+static void net_init(unsigned short port)
+{
+	struct sockaddr_in sin;
+	sock_fd = socket(AF_INET, SOCK_STREAM, 0);
+	if (sock_fd == -1) {
+		perror("socket");
+		exit(1);
+	}
+	sin.sin_family = AF_INET;
+	sin.sin_addr.s_addr = htonl(0x7F000001);
+	sin.sin_port = htons(port);
+	if (bind(sock_fd, (struct sockaddr *)&sin, sizeof(sin)) == -1) {
+		perror("bind");
+		exit(1);
+	}
+	/* TODO set reuseaddr */
+	listen(sock_fd, 1);
+
+	printf("[Waiting terminal connection...]\n");
+	fflush(stdout);
+
+	in_fd = accept(sock_fd, NULL, NULL);
+	if (in_fd == -1) {
+		perror("accept");
+		exit(1);
+	}
+	close(sock_fd);
+	fcntl(in_fd, F_SETFL, FNDELAY);
+	out_fd = in_fd;
+	max_fd = out_fd + 1;
+}
+
 void halt_system(void)
 {
 	printf("System halted at %04X\n", cpu6_pc());
@@ -912,14 +986,16 @@ static void load_rom(const char *name, uint16_t addr, uint16_t len)
 
 void usage(void)
 {
-	fprintf(stderr, "centurion [-s diagswitches] [-d debug]\n");
+	fprintf(stderr, "centurion [-l port] [-s switches] [-S diagswitches] [-d debug]\n");
 	exit(1);
 }
 
 int main(int argc, char *argv[])
 {
 	int opt;
-	while ((opt = getopt(argc, argv, "d:s:S:F")) != -1) {
+	unsigned port = 0;
+
+	while ((opt = getopt(argc, argv, "d:l:s:S:F")) != -1) {
 		switch (opt) {
 		case 'd':
 			trace = atoi(optarg);
@@ -935,6 +1011,9 @@ int main(int argc, char *argv[])
 		case 'F':
 			finch = 1;
 			break;
+		case 'l':
+			port = atoi(optarg);
+			break;
 		default:
 			usage();
 		}
@@ -942,20 +1021,10 @@ int main(int argc, char *argv[])
 	if (optind < argc)
 		usage();
 
-	if (tcgetattr(0, &term) == 0) {
-		saved_term = term;
-		atexit(exit_cleanup);
-		signal(SIGINT, cleanup);
-		signal(SIGQUIT, cleanup);
-		signal(SIGPIPE, cleanup);
-		term.c_lflag &= ~(ICANON | ECHO);
-		term.c_cc[VMIN] = 0;
-		term.c_cc[VTIME] = 1;
-		term.c_cc[VINTR] = 0;
-		term.c_cc[VSUSP] = 0;
-		term.c_cc[VSTOP] = 0;
-		tcsetattr(0, TCSADRAIN, &term);
-	}
+	if (port == 0)
+		tty_init();
+	else
+		net_init(port);
 	load_rom("bootstrap_unscrambled.bin", 0xFC00, 0x0200);
 	load_rom("Diag_F1_Rev_1.0.BIN", 0x8000, 0x0800);
 	load_rom("Diag_F2_Rev_1.0.BIN", 0x8800, 0x0800);
