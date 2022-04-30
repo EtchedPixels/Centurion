@@ -899,11 +899,13 @@ static uint16_t decode_address(unsigned size, unsigned mode)
 		indir = 2;
 		break;
 	case 3:
-		addr = pc + (int8_t)fetch();	/* signed ? */
+		addr = (int8_t)fetch();
+		addr += pc;
 		indir = 0;
 		break;
 	case 4:
-		addr = pc + (int8_t)fetch();
+		addr = (int8_t)fetch();
+		addr += pc;
 		indir = 1;
 		break;
 	case 5:
