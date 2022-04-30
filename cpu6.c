@@ -329,7 +329,7 @@ static void arith_flags(unsigned r, uint8_t d)
 	if (r & 0x80)
 		alu_out |= ALU_M;
 	if ((r ^ d) & 0x80)
-		alu_out |= ALU_V;
+		alu_out |= ALU_F;
 }
 
 /*
