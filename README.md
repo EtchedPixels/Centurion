@@ -2,7 +2,7 @@
 
 An emulator the pieces we know so far of the Centurion Computer CPU-6 and
 the diagnostics ROM images. It's good enough to run most of the diagnostics
-and to pass the CPU self test.
+and to pass some of the CPU self test.
 
 The core of the processor is based upon the Eldorado Electrodata EE200, and
 it is from this that most of the data is pulled.
@@ -27,6 +27,8 @@ There are differences however:
 
 * Interrupt model
 * The various mystery instructions used in the CPU test and memory test
+* V flag - seems not to agree with the EE200 manual ? try a full V rule
+
 
 ## Compiling/Running
 

@@ -23,6 +23,7 @@
 
 static uint8_t cpu_ipl = 0;
 static uint16_t pc = 0xFC00;
+static uint16_t exec_pc;	/* PC at instruction fetch */
 static uint8_t op;
 static uint8_t alu_out;
 static uint8_t switches = 0xF0;
@@ -169,21 +170,21 @@ static void reg_write(uint8_t r, uint8_t v)
 static uint16_t regpair_read(uint8_t r)
 {
 	if (r > 15) {
-		fprintf(stderr, "Bad regpair encoding %02X %02X %04X\n", op, r,
-			pc);
+		fprintf(stderr, "Bad regpair encoding %02X %02X %04X\n",
+			op, r, exec_pc);
 		exit(1);
 	}
-	return (reg_read((r | 1)^ 1) << 8) | reg_read((r ^ 1));
+	return (reg_read((r | 1) ^ 1) << 8) | reg_read((r ^ 1));
 }
 
 static void regpair_write(uint8_t r, uint16_t v)
 {
 	if (r > 15) {
 		fprintf(stderr, "Bad regpair encoding %02X %04X\n", op,
-			pc);
+			exec_pc);
 		exit(1);
 	}
-	reg_write((r | 1) ^ 1 , v >> 8);
+	reg_write((r | 1) ^ 1, v >> 8);
 	reg_write((r ^ 1), v);
 }
 
@@ -267,7 +268,8 @@ static int mmu_loadop(uint8_t subop)
 	uint16_t val = fetch16();
 
 	if (bank < 0 || bank > 7) {
-		fprintf(stderr, "MMU bad bank %02X at %04X\n", bank, pc - 4);
+		fprintf(stderr, "MMU bad bank %02X at %04X\n", bank,
+			exec_pc);
 		exit(1);
 	}
 	if (subop == 0x1C)
@@ -275,7 +277,8 @@ static int mmu_loadop(uint8_t subop)
 	else if (subop == 0x0C)
 		mmu[cpu_ipl][bank][0] = (val >> 5);
 	else {
-		fprintf(stderr, "MMU bad subop %02X at %04X\n", bank, pc - 4);
+		fprintf(stderr, "MMU bad subop %02X at %04X\n", bank,
+			exec_pc);
 		exit(1);
 	}
 	return 0;
@@ -321,15 +324,24 @@ static void ldflags(unsigned r)
  *
  *	L is set only by add so done in add
  */
-static void arith_flags(unsigned r, uint8_t d)
+static void arith_flags(unsigned r, uint8_t a, uint8_t b)
 {
 	alu_out &= ~(ALU_F | ALU_M | ALU_V);
 	if ((r & 0xFF) == 0)
 		alu_out |= ALU_V;
 	if (r & 0x80)
 		alu_out |= ALU_M;
-	if ((r ^ d) & 0x80)
-		alu_out |= ALU_F;
+/*	if ((r ^ d) & 0x80)
+		alu_out |= ALU_F; */
+
+	/* Overflow for addition is (!r & x & m) | (r & !x & !m) */
+	if (r & 0x80) {
+		if (!((a | b) & 0x80))
+			alu_out |= ALU_F;
+	} else {
+		if (a & b & 0x80)
+			alu_out |= ALU_F;
+	}
 }
 
 /*
@@ -343,6 +355,7 @@ static void sub_flags(uint8_t r, uint8_t d)
 		alu_out |= ALU_V;
 	if (r & 0x80)
 		alu_out |= ALU_M;
+	/* This iw hat is claimed but it's not what seems to happen */
 	if ((r ^ d) & 0x80)
 		alu_out |= ALU_F;
 }
@@ -373,11 +386,11 @@ static void logic_flags(unsigned r)
 static void shift_flags(unsigned c, unsigned r)
 {
 	alu_out &= ~(ALU_L | ALU_M | ALU_V);
-	if ((r & 0xFFFF) == 0)
+	if ((r & 0xFF) == 0)
 		alu_out |= ALU_V;
 	if (c)
 		alu_out |= ALU_L;
-	if (r & 0x8000)
+	if (r & 0x80)
 		alu_out |= ALU_M;
 }
 
@@ -406,7 +419,7 @@ static void ldflags16(unsigned r)
  *
  *	L is set only by add so done in add
  */
-static void arith_flags16(unsigned r, uint16_t d)
+static void arith_flags16(unsigned r, uint16_t a, uint16_t b)
 {
 	alu_out &= ~(ALU_F | ALU_M | ALU_V);
 	if ((r & 0xFFFF) == 0)
@@ -415,8 +428,16 @@ static void arith_flags16(unsigned r, uint16_t d)
 		alu_out |= ALU_M;
 	/* If the result is negative but both inputs were positive then
 	   we overflowed */
-	if ((r ^ d) & 0x8000)
-		alu_out |= ALU_F;
+/* 	if ((r ^ d) & 0x8000)
+		alu_out |= ALU_F; */
+	/* Overflow for addition is (!r & x & m) | (r & !x & !m) */
+	if (r & 0x8000) {
+		if (!((a | b) & 0x8000))
+			alu_out |= ALU_F;
+	} else {
+		if (a & b & 0x8000)
+			alu_out |= ALU_F;
+	}
 }
 
 /*
@@ -470,31 +491,38 @@ static void shift_flags16(unsigned c, unsigned r)
 
 
 /*
- *	Arithmetic flag but not link
+ *	INC/DEC are not full maths ops it seems
  */
 static int inc(unsigned reg)
 {
-	uint8_t r = reg_read(reg);
-	reg_write(reg, r + 1);
-	arith_flags(r + 1, r);
+	uint8_t r = reg_read(reg) + 1;
+	reg_write(reg, r);
+	arith_flags(r, r - 1, 1);
 	return 0;
 }
 
 /*
- *	Does not affect L either
+ *	This one is a bit strange
+ *
+ *	FF->0 expects !F !L M
+ *
  */
 static int dec(unsigned reg)
 {
-	uint8_t r = reg_read(reg);
-	reg_write(reg, r - 1);
-	sub_flags(r - 1, r);
+	uint8_t r = reg_read(reg) - 1;
+	reg_write(reg, r);
+	alu_out &= ~(ALU_L | ALU_V | ALU_M | ALU_F);
+	if (r == 0)
+		alu_out |= ALU_V;
+	if (r & 0x80)
+		alu_out |= ALU_M;
 	return 0;
 }
 
 static int clr(unsigned reg)
 {
 	reg_write(reg, 0);
-	alu_out &= ~(ALU_F|ALU_L|ALU_M);
+	alu_out &= ~(ALU_F | ALU_L | ALU_M);
 	alu_out |= ALU_V;
 	return 0;
 }
@@ -518,7 +546,7 @@ static int sra(unsigned reg, unsigned count)
 	uint8_t v;
 	uint8_t r = reg_read(reg);
 
-	while(count--) {
+	while (count--) {
 		v = r >> 1;
 		if (v & 0x40)
 			v |= 0x80;
@@ -537,12 +565,12 @@ static int sll(unsigned reg, unsigned count)
 	uint8_t r = reg_read(reg);
 	uint8_t v;
 
-	while(count--) {
+	while (count--) {
 		v = r << 1;
 		shift_flags((r & 0x80), v);
 		alu_out &= ~ALU_F;
 		/* So annoying C lacks a ^^ operator */
-		switch(alu_out & (ALU_L | ALU_M)) {
+		switch (alu_out & (ALU_L | ALU_M)) {
 		case ALU_L:
 		case ALU_M:
 			alu_out |= ALU_F;
@@ -562,7 +590,7 @@ static int rrc(unsigned reg, unsigned count)
 	uint8_t r = reg_read(reg);
 	uint8_t c;
 
-	while(count--) {
+	while (count--) {
 		c = r & 1;
 
 		r >>= 1;
@@ -580,7 +608,7 @@ static int rlc(unsigned reg, unsigned count)
 	uint8_t r = reg_read(reg);
 	uint8_t c;
 
-	while(count--) {
+	while (count--) {
 		c = r & 0x80;
 		r <<= 1;
 		r |= (alu_out & ALU_L) ? 1 : 0;
@@ -588,7 +616,7 @@ static int rlc(unsigned reg, unsigned count)
 		shift_flags(c, r);
 		alu_out &= ~ALU_F;
 		/* So annoying C lacks a ^^ operator */
-		switch(alu_out & (ALU_L | ALU_M)) {
+		switch (alu_out & (ALU_L | ALU_M)) {
 		case ALU_L:
 		case ALU_M:
 			alu_out |= ALU_F;
@@ -605,11 +633,11 @@ static int rlc(unsigned reg, unsigned count)
 static int add(unsigned dst, unsigned src)
 {
 	uint16_t d = reg_read(dst);
-	uint16_t r = d + reg_read(src);
-	reg_write(dst, r);
-	arith_flags(r, d);
+	uint16_t s = reg_read(src);
+	reg_write(dst, d + s);
+	arith_flags(d + s, d, s);
 	alu_out &= ~ALU_L;
-	if (r & 0x100)
+	if ((s + d) & 0x100)
 		alu_out |= ALU_L;
 	return 0;
 }
@@ -625,8 +653,11 @@ static int sub(unsigned dst, unsigned src)
 	reg_write(dst, r);
 	sub_flags(s - d, d);
 	alu_out &= ~ALU_L;
-	if (d < s)
+	if (d <= s)
 		alu_out |= ALU_L;
+	/* This diagrees with the docs .. needs more study */
+	if (d == s)
+		alu_out &= ~ALU_F;
 	return 0;
 }
 
@@ -670,17 +701,21 @@ static int mov(unsigned dst, unsigned src)
 
 static int inc16(unsigned reg)
 {
-	uint16_t r = regpair_read(reg);
-	regpair_write(reg, r + 1);
-	arith_flags16(r + 1, r);
+	uint16_t r = regpair_read(reg) + 1;
+	regpair_write(reg, r);
+	arith_flags(r, r - 1, 1);
 	return 0;
 }
 
 static int dec16(unsigned reg)
 {
-	uint16_t r = regpair_read(reg);
-	regpair_write(reg, r - 1);
-	sub_flags16(r - 1, r);
+	uint16_t r = regpair_read(reg) - 1;
+	regpair_write(reg, r);
+	alu_out &= ~(ALU_L | ALU_V | ALU_M | ALU_F);
+	if (r == 0)
+		alu_out |= ALU_V;
+	if (r & 0x8000)
+		alu_out |= ALU_M;
 	return 0;
 }
 
@@ -688,7 +723,7 @@ static int dec16(unsigned reg)
 static int clr16(unsigned reg)
 {
 	regpair_write(reg, 0);
-	alu_out &= ~(ALU_F|ALU_L|ALU_M);
+	alu_out &= ~(ALU_F | ALU_L | ALU_M);
 	alu_out |= ALU_V;
 	return 0;
 }
@@ -706,7 +741,7 @@ static int sra16(unsigned reg, unsigned count)
 	uint16_t v;
 	uint16_t r = regpair_read(reg);
 
-	while(count--) {
+	while (count--) {
 		v = r >> 1;
 		if (v & 0x4000)
 			v |= 0x8000;
@@ -722,12 +757,12 @@ static int sll16(unsigned reg, unsigned count)
 	uint16_t v;
 	uint16_t r = regpair_read(reg);
 
-	while(count--) {
+	while (count--) {
 		v = r << 1;
 		shift_flags16((r & 0x8000), v);
 		alu_out &= ~ALU_F;
 		/* So annoying C lacks a ^^ operator */
-		switch(alu_out & (ALU_L | ALU_M)) {
+		switch (alu_out & (ALU_L | ALU_M)) {
 		case ALU_L:
 		case ALU_M:
 			alu_out |= ALU_F;
@@ -744,8 +779,8 @@ static int rrc16(unsigned reg, unsigned count)
 	uint16_t r = regpair_read(reg);
 	uint16_t c;
 
-	while(count--) {
-		c= r & 1;
+	while (count--) {
+		c = r & 1;
 
 		r >>= 1;
 		r |= (alu_out & ALU_L) ? 0x8000 : 0;
@@ -761,7 +796,7 @@ static int rlc16(unsigned reg, unsigned count)
 	uint16_t r = regpair_read(reg);
 	uint16_t c;
 
-	while(count--) {
+	while (count--) {
 		c = r & 0x8000;
 
 		r <<= 1;
@@ -770,7 +805,7 @@ static int rlc16(unsigned reg, unsigned count)
 		shift_flags16(c, r);
 		alu_out &= ~ALU_F;
 		/* So annoying C lacks a ^^ operator */
-		switch(alu_out & (ALU_L | ALU_M)) {
+		switch (alu_out & (ALU_L | ALU_M)) {
 		case ALU_L:
 		case ALU_M:
 			alu_out |= ALU_F;
@@ -784,11 +819,11 @@ static int rlc16(unsigned reg, unsigned count)
 static int add16(unsigned dst, unsigned src)
 {
 	unsigned d = regpair_read(dst);
-	unsigned r = d + regpair_read(src);
-	regpair_write(dst, r);
-	arith_flags16(r, d);
+	unsigned s = regpair_read(src);
+	regpair_write(dst, d + s);
+	arith_flags16(d + s, d, s);
 	alu_out &= ~ALU_L;
-	if (r & 0x10000)
+	if ((s + d) & 0x10000)
 		alu_out |= ALU_L;
 	return 0;
 }
@@ -801,7 +836,7 @@ static int sub16(unsigned dst, unsigned src)
 	regpair_write(dst, r);
 	sub_flags16(s - d, d);
 	alu_out &= ~ALU_L;
-	if (d < s)
+	if (d <= s)
 		alu_out |= ALU_L;
 	return 0;
 }
@@ -865,11 +900,11 @@ static uint16_t indexed_address(unsigned size)
 		addr = regpair_read(r);
 		addr -= size;
 		regpair_write(r, addr);
-		addr =  addr + offset;
+		addr = addr + offset;
 		break;
 	default:
 		fprintf(stderr, "Unknown indexing mode %02X at %04X\n",
-			idx, pc);
+			idx, exec_pc);
 		exit(1);
 	}
 	if (idx & 0x04)
@@ -899,12 +934,12 @@ static uint16_t decode_address(unsigned size, unsigned mode)
 		indir = 2;
 		break;
 	case 3:
-		addr = (int8_t)fetch();
+		addr = (int8_t) fetch();
 		addr += pc;
 		indir = 0;
 		break;
 	case 4:
-		addr = (int8_t)fetch();
+		addr = (int8_t) fetch();
 		addr += pc;
 		indir = 1;
 		break;
@@ -916,7 +951,7 @@ static uint16_t decode_address(unsigned size, unsigned mode)
 	case 6:
 	case 7:
 		fprintf(stderr, "unknown address indexing %X at %04X\n",
-			mode, pc);
+			mode, exec_pc);
 		break;
 	default:
 		/* indexed off a register */
@@ -959,53 +994,53 @@ static int branch_op(void)
 	int8_t off;
 
 	switch (op & 0x0F) {
-	case 0:		/* BL	Branch if link is set */
+	case 0:		/* BL   Branch if link is set */
 		t = (alu_out & ALU_L);
 		break;
-	case 1:		/* BNL	Branch if link is not set */
+	case 1:		/* BNL  Branch if link is not set */
 		t = !(alu_out & ALU_L);
 		break;
-	case 2:		/* BF 	Branch if fault is set */
+	case 2:		/* BF   Branch if fault is set */
 		t = (alu_out & ALU_F);
 		break;
-	case 3:		/* BNF	Branch if fault is not set */
+	case 3:		/* BNF  Branch if fault is not set */
 		t = !(alu_out & ALU_F);
 		break;
-	case 4:		/* BZ	Branch if zero */
+	case 4:		/* BZ   Branch if zero */
 		t = (alu_out & ALU_V);
 		break;
-	case 5:		/* BNZ	Branch if non zero */
+	case 5:		/* BNZ  Branch if non zero */
 		t = !(alu_out & ALU_V);
 		break;
-	case 6:		/* BM	Branch if minus */
+	case 6:		/* BM   Branch if minus */
 		t = alu_out & ALU_M;
 		break;
-	case 7:		/* BP	Branch if plus */
+	case 7:		/* BP   Branch if plus */
 		t = !(alu_out & ALU_M);
 		break;
-	case 8:		/* BGZ	Branch if greater than zero */
+	case 8:		/* BGZ  Branch if greater than zero */
 		/* Branch if both M and V are zero */
 		t = !(alu_out & (ALU_M | ALU_V));
 		break;
-	case 9:		/* BLE	Branch if less than or equal to zero */
+	case 9:		/* BLE  Branch if less than or equal to zero */
 		t = alu_out & (ALU_M | ALU_V);
 		break;
-	case 10:	/* BS1  */
+	case 10:		/* BS1  */
 		t = (switches & BS1);
 		break;
-	case 11:	/* BS2 */
+	case 11:		/* BS2 */
 		t = (switches & BS2);
 		break;
-	case 12:	/* BS3 */
+	case 12:		/* BS3 */
 		t = (switches & BS3);
 		break;
-	case 13:	/* BS4 */
+	case 13:		/* BS4 */
 		t = (switches & BS4);
 		break;
-	case 14:	/* BTM - branch on teletype mark - CPU4 only ? */
+	case 14:		/* BTM - branch on teletype mark - CPU4 only ? */
 		t = 0;
 		break;
-	case 15:	/* BEP - branch on even parity - CPU4 only ? */
+	case 15:		/* BEP - branch on even parity - CPU4 only ? */
 		t = 0;
 		break;
 	}
@@ -1040,36 +1075,36 @@ static int low_op(void)
 		break;
 	case 0x01:		/* NOP */
 		break;
-	case 0x02:		/* SF	Set Fault */
+	case 0x02:		/* SF   Set Fault */
 		alu_out |= ALU_F;
 		break;
-	case 0x03:		/* RF	Reset Fault */
+	case 0x03:		/* RF   Reset Fault */
 		alu_out &= ~ALU_F;
 		break;
-	case 0x04:		/* EI	Enable Interrupts */
+	case 0x04:		/* EI   Enable Interrupts */
 		int_enable = 1;
 		break;
-	case 0x05:		/* DI	Disable Interrupts */
+	case 0x05:		/* DI   Disable Interrupts */
 		int_enable = 0;
 		break;
-	case 0x06:		/* SL	Set Link */
+	case 0x06:		/* SL   Set Link */
 		alu_out |= ALU_L;
 		break;
-	case 0x07:		/* RL	Clear Link */
+	case 0x07:		/* RL   Clear Link */
 		alu_out &= ~ALU_L;
 		break;
-	case 0x08:		/* CL	Complement Link */
+	case 0x08:		/* CL   Complement Link */
 		alu_out ^= ALU_L;
 		break;
-	case 0x09:		/* RSR	Return from subroutine */
+	case 0x09:		/* RSR  Return from subroutine */
 		pc = regpair_read(X);
 		regpair_write(X, pop());
 		break;
-	case 0x0A:		/* RI	Return from interrupt */
+	case 0x0A:		/* RI   Return from interrupt */
 		/* This may differ a bit on the CPU6 seems to have a carry
 		   involvement */
 		regpair_write(P, pc);
-	case 0x0B:		/* RIM	Return from interrupt modified */
+	case 0x0B:		/* RIM  Return from interrupt modified */
 		reactivate_pri();
 		break;
 	case 0x0C:
@@ -1079,16 +1114,16 @@ static int low_op(void)
 		/* No flag effects */
 		regpair_write(X, pc);
 		break;
-	/*
-	 * "..0x0E ought to be a long (but not infinite) loop.
-	 *  The delay opcode 0x0E should 4.5ms long.  I do not know how the
-	 *  CPU5 & CPU6 handles the 0E but in the CPU4 it stopped the system
-	 *  clock for the full 4.5ms, it even stopped the DMA channel for the
-	 *  4.5ms which caused problems if you happened to be in the middle of
-	 *  a disk R/W operation because the disk drive did not stop spinning
-	 *  so disk data got screwed up."
-	 *		-- Ken Romain
-	 */
+		/*
+		 * "..0x0E ought to be a long (but not infinite) loop.
+		 *  The delay opcode 0x0E should 4.5ms long.  I do not know how the
+		 *  CPU5 & CPU6 handles the 0E but in the CPU4 it stopped the system
+		 *  clock for the full 4.5ms, it even stopped the DMA channel for the
+		 *  4.5ms which caused problems if you happened to be in the middle of
+		 *  a disk R/W operation because the disk drive did not stop spinning
+		 *  so disk data got screwed up."
+		 *              -- Ken Romain
+		 */
 	case 0x0E:		/* DELAY */
 		break;
 	case 0x0F:
@@ -1097,10 +1132,10 @@ static int low_op(void)
 		   variant used to flip ipl during the testing or maybe
 		   a syscall style ret */
 		/* The RAM test stacks
-		           ipl.b	; ipl to return to
-		           0.b		;
-		           rt.w		; return RT ?
-		           0.b
+		   ipl.b        ; ipl to return to
+		   0.b          ;
+		   rt.w         ; return RT ?
+		   0.b
 		   and appears to flip ipl and set pc to the old rt so it's
 		   more like a RTWP on a TI990 than a reti ? */
 		{
@@ -1147,7 +1182,7 @@ static int dma_op(void)
 		break;
 	default:
 		fprintf(stderr, "Unknown DMA operations 2F%02X at %04X\n",
-			op, pc);
+			op, exec_pc);
 		break;
 	}
 	return 0;
@@ -1170,7 +1205,7 @@ static int move_op(void)
 	if (op == 0x0C || op == 0x1C)
 		return mmu_loadop(op);
 	/* Guesswork at this point */
-	fprintf(stderr, "Unknown 0x2E op %02X at %04X\n", op, pc);
+	fprintf(stderr, "Unknown 0x2E op %02X at %04X\n", op, exec_pc);
 	mov16(op >> 4, op & 0x0F);
 	return 0;
 }
@@ -1217,7 +1252,7 @@ static int jump_op(void)
  *	an A or B load. That makes sense given you want to pass flags
  *	and often finish with LD RT,(SP)+, RET which would trash them
  */
-static int rt_op(void)
+static int x_op(void)
 {
 	/* Valid modes 0-5 */
 	uint16_t addr = decode_address(2, op & 7);
@@ -1225,11 +1260,11 @@ static int rt_op(void)
 	if (op & 0x08) {
 		r = regpair_read(X);
 		mem_write16(addr, r);
-		/* FIXME: FLAGS */
+		ldflags16(r);
 	} else {
 		r = mem_read16(addr);
 		regpair_write(X, r);
-		/* FIXME: FLAGS */
+		ldflags16(r);
 	}
 	return 0;
 }
@@ -1320,7 +1355,7 @@ static int misc2x_special(uint8_t reg)
 		return 0;
 	}
 	fprintf(stderr, "Unknown misc2x special %02X:%02X at %04X\n", op,
-		reg, pc - 1);
+		reg, exec_pc);
 	return 0;
 }
 
@@ -1366,8 +1401,8 @@ static int misc2x_op(void)
 		return sra(AL, 1);
 	case 0x2D:
 		return sll(AL, 1);
-	/* On CPU 4 these would be inc XL/dec XL but they are not present and
-	   X is almost always handled as a 16bit register only */
+		/* On CPU 4 these would be inc XL/dec XL but they are not present and
+		   X is almost always handled as a 16bit register only */
 	case 0x2E:
 		return move_op();
 	case 0x2F:
@@ -1381,7 +1416,7 @@ static int misc2x_op(void)
 /* Like misc2x but word */
 static int misc3x_op(void)
 {
-	unsigned count  = 0;
+	unsigned count = 0;
 	unsigned reg = A;
 	if (!(op & 8)) {
 		reg = fetch();
@@ -1453,7 +1488,7 @@ static int alu4x_op(void)
 		return mov(dst, src);
 	case 0x46:		/* unused */
 		fprintf(stderr, "Unknown ALU4 op %02X at %04X\n", op,
-			pc - 1);
+			exec_pc);
 		return 0;
 	case 0x47:		/* unused */
 		return mmu_op47();
@@ -1471,7 +1506,8 @@ static int alu4x_op(void)
 		return mov(BL, AL);
 	case 0x4E:		/* unused */
 	case 0x4F:		/* unused */
-		fprintf(stderr, "Unknown ALU4 op %02X at %04X\n", op, pc);
+		fprintf(stderr, "Unknown ALU4 op %02X at %04X\n", op,
+			exec_pc);
 		return 0;
 	default:
 		fprintf(stderr, "internal error alu4\n");
@@ -1488,7 +1524,7 @@ static int alu5x_op(void)
 		if (dst & 0x11) {
 			fprintf(stderr,
 				"ALU5 - unknown reg encoding %02X at %04X\n",
-				dst, pc - 1);
+				dst, exec_pc);
 			exit(1);
 		}
 		src = dst >> 4;
@@ -1510,7 +1546,7 @@ static int alu5x_op(void)
 	case 0x56:		/* unused */
 	case 0x57:		/* unused */
 		fprintf(stderr, "Unknown ALU5 op %02X at %04X\n", op,
-			pc - 1);
+			exec_pc);
 		return 0;
 	case 0x58:
 		return add16(B, A);
@@ -1518,10 +1554,10 @@ static int alu5x_op(void)
 		return sub16(B, A);
 	case 0x5A:
 		return and16(B, A);
-	case 0x5B:	/* Microcode and 86D7 suggest not an or16 */
+	case 0x5B:		/* Microcode and 86D7 suggest not an or16 */
 		/* return or16(B, A); */
 		return mov16(X, A);
-	/* These are borrowed for moves */
+		/* These are borrowed for moves */
 	case 0x5C:
 		return mov16(Y, A);
 	case 0x5D:
@@ -1573,22 +1609,255 @@ void cpu6_interrupt(unsigned trace)
 		pc = regpair_read(P);
 		alu_out = reg_read(CL);
 		if (trace)
-			fprintf(stderr, "Interrupt %X: New PC = %04X, previous IPL %X\n",
+			fprintf(stderr,
+				"Interrupt %X: New PC = %04X, previous IPL %X\n",
 				cpu_ipl, pc, old_ipl);
 	}
 }
 
+/* Disassembler */
+
+static const char *r8map[16] = {
+	"AH", "AL",
+	"BH", "BL",
+	"XH", "XL",
+	"YH", "YL",
+	"ZH", "ZL",
+	"SH", "SL",
+	"CH", "CL",
+	"PH", "PL"
+};
+
+static const char *r16map[16] = {
+	"A", "AHH",
+	"B", "BHH",
+	"X", "XHH",
+	"Y", "YHH",
+	"Z", "ZHH",
+	"S", "SHH",
+	"C", "CHH",
+	"P", "PHH"
+};
+
+static const char *r8name(unsigned n)
+{
+	n &= 0x0F;
+	return r8map[n];
+}
+
+static const char *r16name(unsigned n)
+{
+	n &= 0x0F;
+	return r16map[n];
+}
+
+static void dis16d(unsigned rpc)
+{
+	uint16_t n = mem_read8_debug(rpc) << 8;
+	n |= mem_read8_debug(rpc + 1);
+	fprintf(stderr, "%04X", n);
+}
+
+static void disindexed(unsigned rpc)
+{
+	unsigned r = mem_read8_debug(rpc);
+	if (r & 4)
+		fputc('@', stderr);
+	if (r & 8)
+		fprintf(stderr, "%d", mem_read8_debug(rpc + 1));
+	switch (r & 3) {
+	case 0:
+		fprintf(stderr, "(%s)\n", r16name(r >> 4));
+		break;
+	case 1:
+		fprintf(stderr, "(%s+)\n", r16name(r >> 4));
+		break;
+	case 2:
+		fprintf(stderr, "(-%s)\n", r16name(r >> 4));
+		break;
+	case 3:
+		fprintf(stderr, "Bad indexing mode.\n");
+		break;
+	}
+}
+
+static void disaddr(unsigned rpc, unsigned size, unsigned op,
+		    unsigned isjump)
+{
+	switch (op) {
+	case 0:
+		dis16d(rpc);
+		break;
+	case 1:
+		if (!isjump)
+			fputc('(', stderr);
+		dis16d(rpc);
+		if (!isjump)
+			fputc(')', stderr);
+		break;
+	case 2:
+		if (!isjump)
+			fputc('@', stderr);
+		fputc('(', stderr);
+		dis16d(rpc);
+		fputc(')', stderr);
+		break;
+	case 3:
+		fprintf(stderr, "(PC+%d)", (int8_t) mem_read8_debug(rpc));
+		break;
+	case 4:
+		fprintf(stderr, "@(PC+%d)", (int8_t) mem_read8_debug(rpc));
+		break;
+	case 5:
+		disindexed(rpc);
+		break;
+	case 6:
+	case 7:
+		fprintf(stderr, "invalid address decode.");
+	}
+	fputc('\n', stderr);
+}
+
+static const char *op0name[] = {
+	"HLT", "NOP", "SF", "RF", "EI", "DI", "SL", "RL",
+	"CL", "RSR", "RI", "RIM", "ELO", "PCX", "DLY", "SYSRET"
+};
+
+static const char *braname[] = {
+	"BL", "BNL", "BF", "BNF", "BZ", "BNZ", "BM", "BP",
+	"BGZ", "BLE", "BS1", "BS2", "BS3", "BS4", "BTM", "BEP"
+};
+
+static const char *alu1name[] = {
+	"INR", "DCR", "CLR", "IVR", "SRR", "SLR", "RRR", "RLR"
+};
+
+static const char *alu2name[] = {
+	"ADD", "SUB", "AND", "ORI", "ORE", "XFR"
+};
+
+static const char *ldst[] = {
+	"LDAB ", "LDA ",
+	"STAB ", "STA ",
+	"LDBB ", "LDB ",
+	"STBB ", "STB "
+};
+
+static void disassemble(unsigned op)
+{
+	unsigned rpc = exec_pc + 1;
+	if (op < 0x10) {
+		fprintf(stderr, "%s\n", op0name[op]);
+		return;
+	}
+	if (op < 0x20) {
+		fprintf(stderr, "%s %d\n", braname[op & 0x0F],
+			mem_read8_debug(rpc));
+		return;
+	}
+	if (op < 0x28) {
+		uint8_t v = mem_read8_debug(rpc);
+		fprintf(stderr, "%sB %s", alu1name[op & 7],
+			r8name(v >> 4));
+		if (v & 0x0F)
+			fprintf(stderr, ", %d", v & 0x0F);
+		fprintf(stderr, "\n");
+		return;
+	}
+	if (op < 0x2E) {
+		fprintf(stderr, "%s AL\n", alu1name[op & 7]);
+		return;
+	}
+	/* TODO DMA 2E MMU 2F */
+	if (op < 0x38) {
+		uint8_t v = mem_read8_debug(rpc);
+		fprintf(stderr, "%s %s", alu1name[op & 7],
+			r16name(v >> 4));
+		if (v & 0x0F)
+			fprintf(stderr, ", %d", v & 0x0F);
+		fprintf(stderr, "\n");
+		return;
+	}
+	if (op < 0x3E) {
+		fprintf(stderr, "%s A\n", alu1name[op & 7]);
+		return;
+	}
+	if (op == 0x3E) {
+		fputs("INX\n", stderr);
+		return;
+	}
+	if (op == 0x3F) {
+		fputs("DCX\n", stderr);
+		return;
+	}
+	if (op < 0x46) {
+		uint8_t v = mem_read8(rpc);
+		fprintf(stderr, "%sB %s, %s\n", alu2name[op & 7],
+			r8name(v >> 4), r8name(v));
+		return;
+	}
+	/* TODO 46 47 */
+	if (op < 0x4E) {
+		fprintf(stderr, "%sB AL,BL\n", alu2name[op & 7]);
+		return;
+	}
+	/* 4E 4F mystery */
+	if (op < 0x56) {
+		uint8_t v = mem_read8(rpc);
+		fprintf(stderr, "%s %s, %s\n", alu2name[op & 7],
+			r16name(v >> 4), r16name(v));
+		return;
+	}
+	/* TODO 46 47 */
+	if (op < 0x5B) {
+		fprintf(stderr, "%s A,B\n", alu2name[op & 7]);
+		return;
+	}
+	if (op < 0x60) {
+		fprintf(stderr, "XA%c\n", "XYBZS"[op - 0x5B]);
+		return;
+	}
+	if (op < 0x70) {
+		/* X ops */
+		if (op & 0x08)
+			fputs("STX ", stderr);
+		else
+			fputs("LDX ", stderr);
+		disaddr(rpc, 2, op & 7, 1);
+		return;
+	}
+	if (op < 0x80) {
+		if (op == 0x76) {
+			fputs("SYSCALL?\n", stderr);
+			return;
+		}
+		if (op & 0x78)
+			fputs("JSR ", stderr);
+		else
+			fputs("JMP ", stderr);
+		disaddr(rpc, 2, op & 7, 0);
+		return;
+	}
+	fputs(ldst[(op & 0x7F) >> 4], stderr);
+	disaddr(rpc, (op & 0x10) ? 2 : 1, op & 15, 0);
+}
+
 unsigned cpu6_execute_one(unsigned trace)
 {
+	exec_pc = pc;
+
 	cpu6_interrupt(trace);
 	if (trace)
 		fprintf(stderr, "CPU %04X: ", pc);
 	op = fetch();
-	if (trace)
-		fprintf(stderr, "%02X %s A:%04X  B:%04X X:%04X Y:%04X Z:%04X S:%04X\n",
+	if (trace) {
+		fprintf(stderr,
+			"%02X %s A:%04X  B:%04X X:%04X Y:%04X Z:%04X S:%04X C:%04X | ",
 			op, flagcode(), regpair_read(A), regpair_read(B),
 			regpair_read(X), regpair_read(Y), regpair_read(Z),
-			regpair_read(S));
+			regpair_read(S), regpair_read(C));
+		disassemble(op);
+	}
 	if (op < 0x10)
 		return low_op();
 	if (op < 0x20)
@@ -1604,7 +1873,7 @@ unsigned cpu6_execute_one(unsigned trace)
 	if (op < 0x60)
 		return alu5x_op();
 	if (op < 0x70)
-		return rt_op();
+		return x_op();
 	if (op < 0x80)
 		return jump_op();
 	return loadstore_op();
@@ -1612,10 +1881,15 @@ unsigned cpu6_execute_one(unsigned trace)
 
 uint16_t cpu6_pc(void)
 {
-	return pc;
+	return exec_pc;
 }
 
 void cpu6_set_switches(unsigned v)
 {
 	switches = v;
+}
+
+unsigned cpu6_halted(void)
+{
+	return halted;
 }

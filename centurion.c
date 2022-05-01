@@ -167,7 +167,7 @@ static void mux_write(uint16_t addr, uint8_t val)
 	if (mux != 0)
 		return;
 
-	if (out_fd) {
+	if (out_fd > 1) {
 		val &= 0x7F;
 		write(out_fd, &val, 1);
 	} else {
@@ -878,6 +878,11 @@ uint8_t mem_read8(uint16_t addr)
 	return r;
 }
 
+uint8_t mem_read8_debug(uint16_t addr)
+{
+	return do_mem_read8(addr, 1);
+}
+
 void mem_write8(uint16_t addr, uint8_t val)
 {
 	if (trace & TRACE_MEM)
@@ -1036,6 +1041,8 @@ int main(int argc, char *argv[])
 
 	while (!emulator_done) {
 		cpu6_execute_one(trace & TRACE_CPU);
+		if (cpu6_halted())
+			halt_system();
 		if (hawk_dma == 1) {
 			if (dma_read_cycle(hawk_read_next()))
 				hawk_dma_done();
