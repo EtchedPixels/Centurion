@@ -25,9 +25,9 @@
 #define C		12	/* Flags ? */
 #define P		14	/* PC */
 
-extern uint8_t mem_read8(uint16_t addr);
-extern uint8_t mem_read8_debug(uint16_t addr);
-extern void mem_write8(uint16_t addr, uint8_t val);
+extern uint8_t mem_read8(uint32_t addr);
+extern uint8_t mem_read8_debug(uint32_t addr);
+extern void mem_write8(uint32_t addr, uint8_t val);
 extern void halt_system(void);
 extern uint16_t cpu6_pc(void);
 extern unsigned cpu6_execute_one(unsigned trace);
@@ -36,3 +36,4 @@ extern uint8_t dma_write_cycle(void);
 extern int dma_write_active(void);
 extern void cpu6_set_switches(unsigned switches);
 extern unsigned cpu6_halted(void);
+extern void cpu6_init(void);

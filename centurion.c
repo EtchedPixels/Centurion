@@ -86,7 +86,9 @@ static unsigned int next_char(void)
 	return lastc;
 }
 
-static uint8_t mem[65536];
+/* 18 bit address space it seems if the top mmu bit is not used. Allocate
+   for the case it is for now */
+static uint8_t mem[0x80000];
 
 static uint8_t hexdigits;
 static unsigned hexblank;
@@ -847,58 +849,59 @@ static void io_write8(uint16_t addr, uint8_t val)
 			cpu6_pc(), addr, val);
 }
 
-static uint16_t remap(uint16_t addr)
+static uint32_t remap(uint32_t addr)
 {
+	addr &= 0x3FFFF;
 	/* We need to fix up the fact the 1K diag RAM appear twice */
-	if (addr >= 0xBC00 && addr <= 0xBFFF)
+	if (addr >= 0x0BC00 && addr <= 0x0BFFF)
 		addr -= 0x400;
 	return addr;
 }
 
-static uint8_t do_mem_read8(uint16_t addr, int dis)
+static uint8_t do_mem_read8(uint32_t addr, int dis)
 {
-	if (addr >= 0xF000 && addr < 0xFC00) {
+	if (addr >= 0x3F000 && addr < 0x3FC00) {
 		if (dis)
 			return 0xFF;
 		else
-			return io_read8(addr);
+			return io_read8(addr & 0xFFFF);
 	} else {
 		addr = remap(addr);
 		return mem[addr];
 	}
 }
 
-uint8_t mem_read8(uint16_t addr)
+uint8_t mem_read8(uint32_t addr)
 {
 	uint8_t r = do_mem_read8(addr, 0);
 	if (trace & TRACE_MEM)
 		if (addr > 0xFF || (trace & TRACE_MEM_REG))
-			fprintf(stderr, "%04X: %04X R %02X\n", cpu6_pc(),
+			fprintf(stderr, "%04X: %05X R %02X\n", cpu6_pc(),
 				addr, r);
 	return r;
 }
 
-uint8_t mem_read8_debug(uint16_t addr)
+uint8_t mem_read8_debug(uint32_t addr)
 {
 	return do_mem_read8(addr, 1);
 }
 
-void mem_write8(uint16_t addr, uint8_t val)
+void mem_write8(uint32_t addr, uint8_t val)
 {
 	if (trace & TRACE_MEM)
 		if (addr > 0xFF || (trace & TRACE_MEM_REG))
-			fprintf(stderr, "%04X: %04X W %02X\n", cpu6_pc(),
+			fprintf(stderr, "%04X: %05X W %02X\n", cpu6_pc(),
 				addr, val);
-	if (addr >= 0xF000 && addr <= 0xFC00) {
-		io_write8(addr, val);
+	if (addr >= 0x3F000 && addr < 0x3FC00) {
+		io_write8(addr & 0xFFFF, val);
 		return;
 	}
 
-	if (addr >= 0x8000 && addr < 0xB800) {
+	if (addr >= 0x08000 && addr < 0x0B800) {
 		fprintf(stderr, "Write to ROM at %04X\n", cpu6_pc());
 		return;
 	}
-	if (addr >= 0xFC00) {
+	if (addr >= 0x3FC00) {
 		fprintf(stderr, "Write to ROM at %04X\n", cpu6_pc());
 		return;
 	}
@@ -975,7 +978,7 @@ void halt_system(void)
 	emulator_done = 1;
 }
 
-static void load_rom(const char *name, uint16_t addr, uint16_t len)
+static void load_rom(const char *name, uint32_t addr, uint16_t len)
 {
 	FILE *fp = fopen(name, "r");
 	if (fp == NULL) {
@@ -1030,14 +1033,16 @@ int main(int argc, char *argv[])
 		tty_init();
 	else
 		net_init(port);
-	load_rom("bootstrap_unscrambled.bin", 0xFC00, 0x0200);
-	load_rom("Diag_F1_Rev_1.0.BIN", 0x8000, 0x0800);
-	load_rom("Diag_F2_Rev_1.0.BIN", 0x8800, 0x0800);
-	load_rom("Diag_F3_Rev_1.0.BIN", 0x9000, 0x0800);
-	load_rom("Diag_F4_1133CMD.BIN", 0x9800, 0x0800);
+	load_rom("bootstrap_unscrambled.bin", 0x3FC00, 0x0200);
+	load_rom("Diag_F1_Rev_1.0.BIN", 0x08000, 0x0800);
+	load_rom("Diag_F2_Rev_1.0.BIN", 0x08800, 0x0800);
+	load_rom("Diag_F3_Rev_1.0.BIN", 0x09000, 0x0800);
+	load_rom("Diag_F4_1133CMD.BIN", 0x09800, 0x0800);
 
 	/* We don't worry here is this works or not */
 	hawk_fd = open("hawk.disk", O_RDWR);
+
+	cpu6_init();
 
 	while (!emulator_done) {
 		cpu6_execute_one(trace & TRACE_CPU);
