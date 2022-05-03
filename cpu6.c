@@ -407,16 +407,20 @@ static void arith_flags(unsigned r, uint8_t a, uint8_t b)
  *	Subtract is similar but the overflow rule probably differs and
  *	L is a borrow not a carry
  */
-static void sub_flags(uint8_t r, uint8_t d)
+static void sub_flags(uint8_t r, uint8_t a, uint8_t b)
 {
 	alu_out &= ~(ALU_F | ALU_M | ALU_V);
 	if ((r & 0xFF) == 0)
 		alu_out |= ALU_V;
 	if (r & 0x80)
 		alu_out |= ALU_M;
-	/* This iw hat is claimed but it's not what seems to happen */
-	if ((r ^ d) & 0x80)
-		alu_out |= ALU_F;
+	if (a & 0x80) {
+		if (!((b | r) & 0x80))
+        		alu_out |= ALU_F;;
+       	} else {
+       		if (b & r & 0x80)
+       			alu_out |= ALU_F;;
+	}
 }
 
 /*
@@ -503,15 +507,20 @@ static void arith_flags16(unsigned r, uint16_t a, uint16_t b)
  *	Subtract is similar but the overflow rule probably differs and
  *	L is a borrow not a carry
  */
-static void sub_flags16(uint16_t r, uint16_t d)
+static void sub_flags16(uint16_t r, uint16_t a, uint16_t b)
 {
 	alu_out &= ~(ALU_F | ALU_M | ALU_V);
 	if ((r & 0xFFFF) == 0)
 		alu_out |= ALU_V;
 	if (r & 0x8000)
 		alu_out |= ALU_M;
-	if ((r ^ d) & 0x8000)
-		alu_out |= ALU_F;
+	if (a & 0x8000) {
+		if (!((b | r) & 0x8000))
+        		alu_out |= ALU_F;;
+       	} else {
+       		if (b & r & 0x8000)
+       			alu_out |= ALU_F;;
+	}
 }
 
 /*
@@ -712,15 +721,12 @@ static int sub(unsigned dst, unsigned src)
 {
 	unsigned s = reg_read(src);
 	unsigned d = reg_read(dst);
-	unsigned r = d - s;
+	unsigned r =  s - d;
 	reg_write(dst, r);
-	sub_flags(s - d, d);
+	sub_flags(r, s, d);
 	alu_out &= ~ALU_L;
 	if (d <= s)
 		alu_out |= ALU_L;
-	/* This diagrees with the docs .. needs more study */
-	if (d == s)
-		alu_out &= ~ALU_F;
 	return 0;
 }
 
@@ -896,9 +902,9 @@ static int sub16(unsigned dst, unsigned src)
 {
 	unsigned s = regpair_read(src);
 	unsigned d = regpair_read(dst);
-	unsigned r = d - s;
+	unsigned r = s - d;
 	regpair_write(dst, r);
-	sub_flags16(s - d, d);
+	sub_flags16(r, s, d);
 	alu_out &= ~ALU_L;
 	if (d <= s)
 		alu_out |= ALU_L;
@@ -1832,7 +1838,7 @@ static void dis_dma(unsigned addr)
 	else if (dmaop == 4)
 		fprintf(stderr, "dmamode %d\n", rp);
 	else
-		fprintf(stderr, "dmaen");
+		fprintf(stderr, "dmaen\n");
 }
 
 static void dis_mmu(unsigned addr)
@@ -2002,7 +2008,7 @@ static void disassemble(unsigned op)
 			fputs("SYSCALL?\n", stderr);
 			return;
 		}
-		if (op & 0x78)
+		if (op & 0x08)
 			fputs("JSR ", stderr);
 		else
 			fputs("JMP ", stderr);

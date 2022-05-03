@@ -36,6 +36,7 @@ static int in_fd = 0;
 static int out_fd = 1;
 static int sock_fd;
 static int max_fd = 2;
+static unsigned diag = 0;
 
 /* Utility functions for the mux */
 static unsigned int check_chario(void)
@@ -147,6 +148,18 @@ static void hexdisplay(uint16_t addr, uint8_t val)
  *	CLS2 CLS1 PI are set and SBS EPE clear. That implies that we've
  *	got 1 too many 1 bits so speed may be encoded. Possibly
  *	CLS2 CLS1 SBS EPE PI
+ *
+ *	The upper half of the mux space appears to be controls
+ *	0,1		MUX port 0
+ *	2,3		MUX port 1
+ *	4,5		MUX port 2
+ *	6,7		MUX port 3
+ *
+ *	0A		Interrupt level ?
+ *	0E		Cleared on IRQ test
+ *	0F		read to check for interrupt - NZ = none
+ *
+ *
  */
 
 static uint8_t muxconf[16];
@@ -198,7 +211,7 @@ static uint8_t mux_read(uint16_t addr)
 		return 0;
 
 	if (data == 1)
-		return next_char();
+		return next_char();	/*( | 0x80; */
 
 	ttystate = check_chario();
 	if (ttystate & 1)
@@ -271,13 +284,13 @@ static void hawk_position(void)
 
 	offset *= 2;
 	offset += head;
-	offset *= 16;
+	offset *= 14;		/* 14 or 16.. we don't know at the moment */
 	offset += sec;
 	offset *= 400;
 
 	if (lseek(hawk_fd, offset, SEEK_SET) == -1) {
 		fprintf(stderr, "hawk position failed (%d,%d,%d) = %lx.\n",
-			cyl, head, sec, (long)offset);
+			cyl, head, sec, (long) offset);
 		hawk_dma = 0;
 		hawk_busy = 0;
 		hawk_status = 0xFE;
@@ -287,7 +300,7 @@ static void hawk_position(void)
 static uint8_t hawk_read_next(void)
 {
 	uint8_t c;
-	if (read(hawk_fd, (void *)&c, 1) != 1) {
+	if (read(hawk_fd, (void *) &c, 1) != 1) {
 		hawk_status = 0xFE;	/* dunno but it does for error, completed */
 		hawk_dma = 0;
 		hawk_busy = 0;
@@ -298,7 +311,7 @@ static uint8_t hawk_read_next(void)
 
 static void hawk_write_next(uint8_t c)
 {
-	if (write(hawk_fd, (void *)&c, 1) != 1) {
+	if (write(hawk_fd, (void *) &c, 1) != 1) {
 		hawk_status = 0xFE;	/* dunno but it does for error, completed */
 		hawk_dma = 0;
 		hawk_busy = 0;
@@ -340,28 +353,28 @@ static void hawk_dma_done(void)
  */
 static void hawk_cmd(uint8_t cmd)
 {
-	switch(cmd) {
-	case 0:	/* Multi sector read  - 1 to 16 sectors */
+	switch (cmd) {
+	case 0:		/* Multi sector read  - 1 to 16 sectors */
 		hawk_busy = 1;
 		hawk_dma = 1;
 		hawk_status = 1;	/* Busy */
 		hawk_position();
 		break;
-	case 1:	/* Multi sector write - ditto */
+	case 1:		/* Multi sector write - ditto */
 		hawk_busy = 1;
 		hawk_dma = 2;
 		hawk_status = 1;
 		hawk_position();
 		break;
-	case 2:	/* Seek */
+	case 2:		/* Seek */
 		hawk_status = 0;
 		hawk_busy = 0;
 		break;
-	case 3:	/* Restore */
+	case 3:		/* Restore */
 		hawk_status = 0;
 		hawk_busy = 0;
 		break;
-	case 4: /* Format sector - Ken thinks but not sure */
+	case 4:		/* Format sector - Ken thinks but not sure */
 	default:
 		fprintf(stderr, "%04X: Unknown hawk command %02X\n",
 			cpu6_pc(), cmd);
@@ -373,7 +386,7 @@ static void hawk_cmd(uint8_t cmd)
 
 static void hawk_write(uint16_t addr, uint8_t val)
 {
-	switch(addr) {
+	switch (addr) {
 	case 0xF140:
 		hawk_unit = val;
 		break;
@@ -383,8 +396,8 @@ static void hawk_write(uint16_t addr, uint8_t val)
 	case 0xF142:
 		hawk_secl = val;
 		break;
-	/* This seems to be a word. The code checks F144 bit 2 for
-	   an error situation, and after the read F144 non zero for error */
+		/* This seems to be a word. The code checks F144 bit 2 for
+		   an error situation, and after the read F144 non zero for error */
 	case 0xF144:
 	case 0xF145:
 		/* Guess.. it's done early in boot */
@@ -394,14 +407,15 @@ static void hawk_write(uint16_t addr, uint8_t val)
 		hawk_cmd(val);
 		break;
 	default:
-		fprintf(stderr, "%04X: Unknown hawk I/O write %04X with %02X\n",
+		fprintf(stderr,
+			"%04X: Unknown hawk I/O write %04X with %02X\n",
 			cpu6_pc(), addr, val);
 	}
 }
 
 static uint8_t hawk_read(uint16_t addr)
 {
-	switch(addr) {
+	switch (addr) {
 	case 0xF144:		/* Some kind of status - NZ is error */
 		return hawk_status;
 	case 0xF145:
@@ -470,7 +484,8 @@ static uint8_t fd_bits;
 static void fdc_dma_in(uint8_t data)
 {
 	if (fd_ptr >= 0x1000) {
-		fprintf(stderr, "%04X: overlong fdc data %02X\n", data, cpu6_pc());
+		fprintf(stderr, "%04X: overlong fdc data %02X\n", data,
+			cpu6_pc());
 		return;
 	}
 	fd_buf[fd_ptr++] = data;
@@ -479,16 +494,17 @@ static void fdc_dma_in(uint8_t data)
 static uint8_t fdc_dma_out(void)
 {
 	if (fd_ptr >= 0x1000) {
-		fprintf(stderr, "%04X: overlong fdc command read\n", cpu6_pc());
+		fprintf(stderr, "%04X: overlong fdc command read\n",
+			cpu6_pc());
 		return 0xFF;
 	}
 	return fd_buf[fd_ptr++];
 }
 
-static void fdc_command_execute(uint8_t *p, int len)
+static void fdc_command_execute(uint8_t * p, int len)
 {
-	while(len-- > 0) {
-		switch(*p++) {
+	while (len-- > 0) {
+		switch (*p++) {
 		case 0x81:
 			p++;	/* We don't know what this does */
 			len--;
@@ -539,10 +555,10 @@ static void fdc_command_execute(uint8_t *p, int len)
  *			     over length blocks and rely on this.
  *
  */
-static void finch_command_execute(uint8_t *p, int len)
+static void finch_command_execute(uint8_t * p, int len)
 {
-	while(len-- > 0) {
-		switch(*p++) {
+	while (len-- > 0) {
+		switch (*p++) {
 		case 0x81:
 			p++;	/* We don't know what this does */
 			len--;
@@ -551,9 +567,9 @@ static void finch_command_execute(uint8_t *p, int len)
 			fprintf(stderr, "restore.\n");
 			break;
 		case 0x83:
-			fprintf(stderr, "seek %d\n", *p <<8 | p[1]);
+			fprintf(stderr, "seek %d\n", *p << 8 | p[1]);
 			p += 2;
-			len-=2;
+			len -= 2;
 			break;
 		case 0x84:
 			fprintf(stderr, "set unit %d\n", *p++);
@@ -564,9 +580,9 @@ static void finch_command_execute(uint8_t *p, int len)
 			len--;
 		case 0x8A:
 			/* Table driven read */
-			while(*p != 0xFF) {
+			while (*p != 0xFF) {
 				fprintf(stderr, "read %d for %d bytes.\n",
-				*p,  p[1] << 8 | p[2]);
+					*p, (p[1] << 8) | p[2]);
 				p += 3;
 				len -= 3;
 			}
@@ -591,9 +607,11 @@ static void fdc_dma_in_done(void)
 				fprintf(stderr, "\n\t");
 		}
 		if (!finch)
-			fdc_command_execute(fd_buf + 0x0F00, fd_ptr - 0x0F01);
+			fdc_command_execute(fd_buf + 0x0F00,
+					    fd_ptr - 0x0F01);
 		else
-			finch_command_execute(fd_buf + 0x0F00, fd_ptr - 0x0F01);
+			finch_command_execute(fd_buf + 0x0F00,
+					      fd_ptr - 0x0F01);
 		fprintf(stderr, "\n");
 	}
 	fd_bits = ST_Fout;
@@ -611,7 +629,7 @@ static void fdc_write8(uint8_t data)
 {
 	if (trace & TRACE_FDC)
 		fprintf(stderr, "fdc write %02X\n", data);
-	switch(data) {
+	switch (data) {
 	case 0x00:		/* Mystery - reset state perhaps ? */
 	case 0x01:		/* Used in the aux memory test */
 	case 0x0F:		/* Used in the aux memory test */
@@ -622,10 +640,10 @@ static void fdc_write8(uint8_t data)
 		fd_bits = ST_Fin;	/* Fin not busy */
 		fd_ptr = 0x0F00;
 		fd_dma = 1;	/* Command in */
-		fd_status = 0x80;	/*??*/
+		fd_status = 0x80;	/*?? */
 		break;
 	case 0x44:		/* seems to be reading the command buffer back */
-		fd_bits = ST_Busy|ST_Fout;	/* busy */
+		fd_bits = ST_Busy | ST_Fout;	/* busy */
 		fd_ptr = 0x0F00;
 		fd_dma = 2;
 		fd_status = 0x00;
@@ -633,7 +651,7 @@ static void fdc_write8(uint8_t data)
 	case 0x45:		/* data follow up */
 		/* Should probably have ST_Busy set at this point ? */
 		/* 1 or 2 ?? */
-		fd_bits = ST_Fin|ST_Busy;	/* Should this be Fout or command based ? */
+		fd_bits = ST_Fin | ST_Busy;	/* Should this be Fout or command based ? */
 		fd_ptr = 0;
 		fd_dma = 2;	/* Data out ? */
 		fd_status = 0x00;	/* Seems to want top bit for error */
@@ -647,12 +665,13 @@ static void fdc_write8(uint8_t data)
 		fd_dma = 1;
 		break;
 	case 0x47:		/* retrieve data from aux memory */
-		fd_bits = ST_Fout|ST_Busy;
+		fd_bits = ST_Fout | ST_Busy;
 		fd_ptr = 0;
 		fd_dma = 2;
 		break;
 	default:
-		fprintf(stderr, "%04X: unknown fdc cmd %02X.\n", cpu6_pc(), data);
+		fprintf(stderr, "%04X: unknown fdc cmd %02X.\n", cpu6_pc(),
+			data);
 		break;
 	}
 }
@@ -706,7 +725,8 @@ static uint8_t cmd_bits;
 static void cmd_dma_cmd_in(uint8_t data)
 {
 	if (cmd_ptr == 256) {
-		fprintf(stderr, "%04X: overlong cmdc command %02X\n", data, cpu6_pc());
+		fprintf(stderr, "%04X: overlong cmdc command %02X\n", data,
+			cpu6_pc());
 		return;
 	}
 	cmdcmd[cmd_ptr++] = data;
@@ -715,7 +735,8 @@ static void cmd_dma_cmd_in(uint8_t data)
 static uint8_t cmd_dma_cmd_out(void)
 {
 	if (cmd_ptr == 256) {
-		fprintf(stderr, "%04X: overlong cmdc command read\n", cpu6_pc());
+		fprintf(stderr, "%04X: overlong cmdc command read\n",
+			cpu6_pc());
 		return 0xFF;
 	}
 	return cmdcmd[cmd_ptr++];
@@ -752,7 +773,7 @@ static void cmd_write8(uint8_t data)
 {
 	if (trace & TRACE_CMD)
 		fprintf(stderr, "cmd write %02X\n", data);
-	switch(data) {
+	switch (data) {
 	case 0x00:		/* Mystery - reset state perhaps ? */
 		cmd_bits = ST_Fout;	/* Fout not busy is expected */
 		break;
@@ -765,10 +786,10 @@ static void cmd_write8(uint8_t data)
 		cmd_bits = ST_Fin;	/* Fout not busy */
 		cmd_ptr = 0;
 		cmd_dma = 1;	/* Command in */
-		cmd_status = 0x80;	/*??*/
+		cmd_status = 0x80;	/*?? */
 		break;
 	case 0x44:		/* seems to be reading the command buffer back */
-		cmd_bits = ST_Busy|ST_Fout;	/* busy */
+		cmd_bits = ST_Busy | ST_Fout;	/* busy */
 		cmd_ptr = 0;
 		cmd_dma = 3;
 		cmd_status = 0x00;
@@ -785,12 +806,13 @@ static void cmd_write8(uint8_t data)
 		fd_dma = 1;
 		break;
 	case 0x47:		/* retrieve data from aux memory */
-		fd_bits = ST_Fout|ST_Busy;
+		fd_bits = ST_Fout | ST_Busy;
 		fd_ptr = 0;
 		fd_dma = 2;
 		break;
 	default:
-		fprintf(stderr, "%04X: unknown cmd cmd %02X.\n", cpu6_pc(), data);
+		fprintf(stderr, "%04X: unknown cmd cmd %02X.\n", cpu6_pc(),
+			data);
 		break;
 	}
 }
@@ -853,7 +875,7 @@ static uint32_t remap(uint32_t addr)
 {
 	addr &= 0x3FFFF;
 	/* We need to fix up the fact the 1K diag RAM appear twice */
-	if (addr >= 0x0BC00 && addr <= 0x0BFFF)
+	if (diag && addr >= 0x0BC00 && addr <= 0x0BFFF)
 		addr -= 0x400;
 	return addr;
 }
@@ -897,7 +919,7 @@ void mem_write8(uint32_t addr, uint8_t val)
 		return;
 	}
 
-	if (addr >= 0x08000 && addr < 0x0B800) {
+	if (diag && addr >= 0x08000 && addr < 0x0B800) {
 		fprintf(stderr, "Write to ROM at %04X\n", cpu6_pc());
 		return;
 	}
@@ -951,7 +973,7 @@ static void net_init(unsigned short port)
 	sin.sin_family = AF_INET;
 	sin.sin_addr.s_addr = htonl(0x7F000001);
 	sin.sin_port = htons(port);
-	if (bind(sock_fd, (struct sockaddr *)&sin, sizeof(sin)) == -1) {
+	if (bind(sock_fd, (struct sockaddr *) &sin, sizeof(sin)) == -1) {
 		perror("bind");
 		exit(1);
 	}
@@ -994,7 +1016,8 @@ static void load_rom(const char *name, uint32_t addr, uint16_t len)
 
 void usage(void)
 {
-	fprintf(stderr, "centurion [-l port] [-s switches] [-S diagswitches] [-d debug]\n");
+	fprintf(stderr,
+		"centurion [-l port] [-d] [-s switches] [-S diagswitches] [-t trace]\n");
 	exit(1);
 }
 
@@ -1003,10 +1026,16 @@ int main(int argc, char *argv[])
 	int opt;
 	unsigned port = 0;
 
-	while ((opt = getopt(argc, argv, "d:l:s:S:F")) != -1) {
+	while ((opt = getopt(argc, argv, "dFl:s:S:t:")) != -1) {
 		switch (opt) {
 		case 'd':
-			trace = atoi(optarg);
+			diag = 1;
+			break;
+		case 'F':
+			finch = 1;
+			break;
+		case 'l':
+			port = atoi(optarg);
 			break;
 		case 's':
 			/* CPU switches */
@@ -1016,11 +1045,8 @@ int main(int argc, char *argv[])
 			/* Diag switches */
 			switches = atoi(optarg);
 			break;
-		case 'F':
-			finch = 1;
-			break;
-		case 'l':
-			port = atoi(optarg);
+		case 't':
+			trace = atoi(optarg);
 			break;
 		default:
 			usage();
@@ -1034,10 +1060,12 @@ int main(int argc, char *argv[])
 	else
 		net_init(port);
 	load_rom("bootstrap_unscrambled.bin", 0x3FC00, 0x0200);
-	load_rom("Diag_F1_Rev_1.0.BIN", 0x08000, 0x0800);
-	load_rom("Diag_F2_Rev_1.0.BIN", 0x08800, 0x0800);
-	load_rom("Diag_F3_Rev_1.0.BIN", 0x09000, 0x0800);
-	load_rom("Diag_F4_1133CMD.BIN", 0x09800, 0x0800);
+	if (diag) {
+		load_rom("Diag_F1_Rev_1.0.BIN", 0x08000, 0x0800);
+		load_rom("Diag_F2_Rev_1.0.BIN", 0x08800, 0x0800);
+		load_rom("Diag_F3_Rev_1.0.BIN", 0x09000, 0x0800);
+		load_rom("Diag_F4_1133CMD.BIN", 0x09800, 0x0800);
+	}
 
 	/* We don't worry here is this works or not */
 	hawk_fd = open("hawk.disk", O_RDWR);
