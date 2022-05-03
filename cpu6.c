@@ -63,6 +63,7 @@ int dma_read_cycle(uint8_t byte)
 		return 1;
 	}
 	if (dma_enable) {
+/*		fprintf(stderr, "%04X: DMA %04X <- %02X\n", dma_count, dma_addr, byte); */
 		mem_write8(dma_addr++, byte);
 	}
 	return 0;
@@ -781,7 +782,7 @@ static int dec16(unsigned reg)
 	uint16_t r = regpair_read(reg) - 1;
 	regpair_write(reg, r);
 	alu_out &= ~(ALU_L | ALU_V | ALU_M | ALU_F);
-	if (r == 0)
+	if ((r & 0xFFFF) == 0)
 		alu_out |= ALU_V;
 	if (r & 0x8000)
 		alu_out |= ALU_M;
@@ -1822,7 +1823,7 @@ static void disaddr(unsigned rpc, unsigned size, unsigned op,
 	fputc('\n', stderr);
 }
 
-static const char *dmaname[4] = { "lddma", "stdma", "lddmac", "stdmac" };
+static const char *dmaname[4] = { "STDMA", "LDDMA", "STDMAC", "LDDMAC" };
 
 static void dis_dma(unsigned addr)
 {
