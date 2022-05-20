@@ -118,9 +118,9 @@ The system trace outputs system IO to the terminal; useful for debugging. The `-
 - `8`: FDC
 - `16`: CMD
 
-For example, in order to trace both *memory* and *registers*, set `-t 2`.
+For example, in order to trace both *memory* and *registers*, set `-t 3`.
 
 ## Halting the emulator
 
-To halt the emulator, simply press `Ctrl-D`, which will land you back on your terminal prompt.
+To halt the emulator, simply press `Ctrl-\`, which will land you back on your terminal prompt.
 
