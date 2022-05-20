@@ -1,0 +1,4 @@
+[submodule "centurion_isa"]
+	path = centurion_isa
+	url = https://github.com/phire/centurion_isa
+	branch = main

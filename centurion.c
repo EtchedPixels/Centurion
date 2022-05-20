@@ -1059,12 +1059,12 @@ int main(int argc, char *argv[])
 		tty_init();
 	else
 		net_init(port);
-	load_rom("bootstrap_unscrambled.bin", 0x3FC00, 0x0200);
+	load_rom("centurion_isa/roms/bootstrap_unscrambled.bin", 0x3FC00, 0x0200);
 	if (diag) {
-		load_rom("Diag_F1_Rev_1.0.BIN", 0x08000, 0x0800);
-		load_rom("Diag_F2_Rev_1.0.BIN", 0x08800, 0x0800);
-		load_rom("Diag_F3_Rev_1.0.BIN", 0x09000, 0x0800);
-		load_rom("Diag_F4_1133CMD.BIN", 0x09800, 0x0800);
+		load_rom("centurion_isa/roms/Diag_F1_Rev_1.0.BIN", 0x08000, 0x0800);
+		load_rom("centurion_isa/roms/Diag_F2_Rev_1.0.BIN", 0x08800, 0x0800);
+		load_rom("centurion_isa/roms/Diag_F3_Rev_1.0.BIN", 0x09000, 0x0800);
+		load_rom("centurion_isa/roms/Diag_F4_1133CMD.BIN", 0x09800, 0x0800);
 	}
 
 	/* We don't worry here is this works or not */
