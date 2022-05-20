@@ -34,13 +34,12 @@ There are differences however:
 
 ### Prerequisites
 
-* Download ROM bin files from https://github.com/phire/centurion_isa/tree/main/roms<br>
-    ```bootstrap_unscrambled.bin```<br>
-	```Diag_F1_Rev_1.0.BIN```<br>
-	```Diag_F2_Rev_1.0.BIN```<br>
-	```Diag_F3_Rev_1.0.BIN```<br>
-	```Diag_F4_1133CMD.BIN```
-* Install C compiler with Make
+* Install C compiler and Make
+* Clone this repository and submodules:
+```
+git clone --recursive https://github.com/EtchedPixels/Centurion.git
+```
+
 
 ### Compiling
 
