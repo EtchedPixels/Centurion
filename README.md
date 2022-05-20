@@ -80,6 +80,23 @@ AUXILIARY TESTS
 ENTER TEST NUMBER:_
 ```
 
+## Test operating system
+
+The test operating system is program `10` (0x0A) on the diag board. You can run it like so:
+
+```
+./centurion -d -s 1 -S 10
+```
+
+The test OS can be used as follows:
+
+- enter `M` followed by a hex address
+  - pressing `space` will print the value at that address, and increment the address
+  - entering a hex value and pressing space will replace the value at that address and increment the address
+- enter `G` followed by a hex address to start executing from that memory address 
+
+For more info, view [the video from Usagi Electrics using the test OS](https://youtu.be/_j2L6nkO8MQ?list=PLnw98JPyObn0wJFdbcRDP7LMz8Aw2T97V&t=828).
+
 ## Command line options
 
 The following options can be used when running the emulator:
