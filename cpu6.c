@@ -307,6 +307,8 @@ static int mmu_loadop(uint8_t subop)
 
 	switch(subop) {
 	case 0x0C:
+		/* Question: are these addresses virtual, are they switched as
+		   one or is the MMU translation live on them ? */
 		while(n--)
 			*mb++ = mmu_mem_read8(addr++);
 		break;
@@ -1036,27 +1038,7 @@ static uint16_t decode_address(unsigned size, unsigned mode)
 }
 
 /*
- *	The branch instructions are not entirely obvious
- *
- *	14/15 are Z and NZ very clearly
- *	1A-1D are the switches
- *
- *	16 is used in AsciiToHexNibble 856D
- *		0x30 - code, taken if code < 0x30
- *	17 is used in 8571
- *		0x47 - code, taken if code >= 0x47
- *
- *	So 16/17 appear to be a pair checking C|Z
- *	
- *
- *	The use of 18 and 19 are a bit odd
- *
- *	8751 uses 19 to branch if the load of (X)+ is negative or zero
- *		so 19 look like taken on N|Z
- *	87B8 uses char minus 0x5F to decide if it should mask lower case
- *		
- *
- *	8757	uses 18 taken if B - A >= 0 (!N !Z)
+ *	Branch instructions
  */
 
 static int branch_op(void)
@@ -1594,9 +1576,9 @@ static int alu4x_op(void)
 	case 0x4A:
 		return and(BL, AL);
 	case 0x4B:
-		return or(BL, AL);
+		return mov(XL, AL);
 	case 0x4C:
-		return xor(BL, AL);
+		return mov(YL, AL);
 	case 0x4D:
 		return mov(BL, AL);
 	case 0x4E:		/* unused */
