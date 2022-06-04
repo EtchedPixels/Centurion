@@ -21,7 +21,8 @@
 
 #include "cpu6.h"
 
-static uint8_t cpu_ipl = 0;
+static uint8_t cpu_ipl = 0;	/* IPL 0-15 */
+static uint8_t cpu_mmu = 0;	/* MMU tag 0-7 */
 static uint16_t pc;
 static uint16_t exec_pc;	/* PC at instruction fetch */
 static uint8_t op;
@@ -40,10 +41,12 @@ static uint16_t dma_addr;
 static uint16_t dma_count;
 static uint8_t dma_mode;
 static uint8_t dma_enable;
+static uint8_t dma_mystery;	/* We don't know what this reg on the AM2901 is
+				   about */
 
 /* SRAM on the CPU card */
 static uint8_t cpu_sram[256];
-static uint8_t mmu[256];
+static uint8_t mmu[8][32];
 
 static void mmu_mem_write8(uint16_t addr, uint8_t val);
 static uint8_t mmu_mem_read8(uint16_t addr);
@@ -185,12 +188,12 @@ uint16_t fetch16(void)
 
 static uint8_t reg_read(uint8_t r)
 {
-	return mem_read8((cpu_ipl << 4) | r);
+	return mmu_mem_read8((cpu_ipl << 4) | r);
 }
 
 static void reg_write(uint8_t r, uint8_t v)
 {
-	mem_write8((cpu_ipl << 4) | r, v);
+	mmu_mem_write8((cpu_ipl << 4) | r, v);
 }
 
 /*
@@ -198,6 +201,12 @@ static void reg_write(uint8_t r, uint8_t v)
  *	a word register specified with an odd value gives you the upper byte
  *	twice.
  */
+
+static uint16_t regpair_addr(uint8_t r)
+{
+	return r + (cpu_ipl << 4);
+}
+
 static uint16_t regpair_read(uint8_t r)
 {
 	if (r > 15) {
@@ -221,10 +230,6 @@ static void regpair_write(uint8_t r, uint16_t v)
 
 /*
  *	Stack helpers
- *
- *	Diag uses -S and S+ for stack operations so assume that this is
- *	the case for internal ones. It's also possible they are sliding them
- *	into another register...
  */
 
 void push(uint16_t val)
@@ -275,7 +280,8 @@ uint8_t popbyte(void)
 static uint32_t mmu_map(uint16_t addr)
 {
 /*	fprintf(stderr, "MMU %X is [%X] -> %X\n", addr, addr >> 11,  (mmu[(addr >> 11)] << 11) |(addr & 0x7FF)); */
-	return (mmu[(addr >> 11)] << 11) + (addr & 0x07FF);
+	/* FIXME: add tag in to shift bank */
+	return (mmu[cpu_mmu][(addr >> 11)] << 11) + (addr & 0x07FF);
 }
 
 /*
@@ -302,7 +308,7 @@ static int mmu_loadop(uint8_t subop)
 		exit(1);
 	}
 
-	mb = mmu + 32 * bank;
+	mb = mmu[bank];
 	n = 32;
 
 	switch(subop) {
@@ -889,11 +895,10 @@ static int rlc16(unsigned reg, unsigned count)
 	return 0;
 }
 
-static int add16(unsigned dst, unsigned src)
+static int add16(unsigned dsta, unsigned s)
 {
-	unsigned d = regpair_read(dst);
-	unsigned s = regpair_read(src);
-	regpair_write(dst, d + s);
+	unsigned d = mmu_mem_read16(dsta);
+	mmu_mem_write16(dsta, d + s);
 	arith_flags16(d + s, d, s);
 	alu_out &= ~ALU_L;
 	if ((s + d) & 0x10000)
@@ -901,12 +906,11 @@ static int add16(unsigned dst, unsigned src)
 	return 0;
 }
 
-static int sub16(unsigned dst, unsigned src)
+static int sub16(unsigned dsta, unsigned s)
 {
-	unsigned s = regpair_read(src);
-	unsigned d = regpair_read(dst);
+	unsigned d = mmu_mem_read16(dsta);
 	unsigned r = s - d;
-	regpair_write(dst, r);
+	mmu_mem_write16(dsta, r);
 	sub_flags16(r, s, d);
 	alu_out &= ~ALU_L;
 	if (d <= s)
@@ -914,35 +918,35 @@ static int sub16(unsigned dst, unsigned src)
 	return 0;
 }
 
-static int and16(unsigned dst, unsigned src)
+static int and16(unsigned dsta, unsigned srcv)
 {
-	uint16_t r = regpair_read(dst) & regpair_read(src);
-	regpair_write(dst, r);
+	uint16_t r = mmu_mem_read16(dsta) & srcv;
+	mmu_mem_write16(dsta, r);
 	logic_flags16(r);
 	return 0;
 }
 
-static int or16(unsigned dst, unsigned src)
+static int or16(unsigned dsta, unsigned srcv)
 {
-	uint16_t r = regpair_read(dst) | regpair_read(src);
-	regpair_write(dst, r);
+	uint16_t r = mmu_mem_read16(dsta) | srcv;
+	mmu_mem_write16(dsta, r);
 	logic_flags16(r);
 	return 0;
 }
 
-static int xor16(unsigned dst, unsigned src)
+static int xor16(unsigned dsta, unsigned srcv)
 {
-	uint16_t r = regpair_read(dst) ^ regpair_read(src);
-	regpair_write(dst, r);
+	uint16_t r = mmu_mem_read16(dsta) ^ srcv;
+	mmu_mem_write16(dsta, r);
 	logic_flags16(r);
 	return 0;
 }
 
-static int mov16(unsigned dst, unsigned src)
+static int mov16(unsigned dsta, unsigned srcv)
 {
-	uint16_t r = regpair_read(src);
-	regpair_write(dst, r);
-	logic_flags16(r);
+	fprintf(stderr, "write16 %x %x\n", dsta, srcv);
+	mmu_mem_write16(dsta, srcv);
+	logic_flags16(srcv);
 	return 0;
 }
 
@@ -1180,26 +1184,19 @@ static int low_op(void)
 	case 0x0E:		/* DELAY */
 		break;
 	case 0x0F:
-		/* CPU6 specific ? */
-		/* 0F is used in the MMU RAM test - some kind of reti
-		   variant used to flip ipl during the testing or maybe
-		   a syscall style ret */
-		/* The RAM test stacks
-		   ipl.b        ; ipl to return to
-		   0.b          ;
-		   rt.w         ; return RT ?
-		   0.b
-		   and appears to flip ipl and set pc to the old rt so it's
-		   more like a RTWP on a TI990 than a reti ? */
+		/* Save PC to P, skip a byte off stack, load PC from X, load X
+		   from stack, load IPL from stack, load mmu tag from stack */
 		{
 			uint16_t new_x, new_pc, new_s;
-			popbyte();
-			new_x = pop();
-			popbyte();
+			regpair_write(P, pc);
+			popbyte();	/* Skips one */
+			new_x = pop();	/* Loads X */
+			cpu_ipl = popbyte();	/* Loads new IL */
 			/* X is set off the stack and S is propogated */
 			new_pc = regpair_read(X);
 			new_s = regpair_read(S);
-			cpu_ipl = popbyte() & 0x0F;
+			/* We flip MMU context after all the POP cases */
+			cpu_mmu = popbyte() & 0x07;
 			regpair_write(X, new_x);
 			regpair_write(S, new_s);
 			pc = new_pc;
@@ -1233,9 +1230,23 @@ static int dma_op(void)
 	case 4:
 		dma_mode = rp;
 		break;
+	case 5:	/* From the microcode analysis */
+		dma_mode = regpair_read(rp);
+		break;
 	case 6:
 		dma_enable = 1;
 		break;
+	case 7:	/* From microcode */
+		dma_enable = 0;
+		break;
+	/* 8-9 read/write some kind of unknown byte status register */
+	case 8:
+		dma_mystery = reg_read(rp);
+		break;
+	case 9:
+		reg_write(rp, dma_mystery);
+		break;
+	/* A-F are not used */
 	default:
 		fprintf(stderr, "Unknown DMA operations 2F%02X at %04X\n",
 			op, exec_pc);
@@ -1249,10 +1260,7 @@ static int dma_op(void)
  *	presumably Z to exit
  *
  *	Weirdnesses
- *	2E 1C and 2E 0C appear to be special and followed by a negated
- *	mmu slot number and two bytes
- *	2E 1C is nonsense (word reg low bit set) but 2E 0C ought to be
- *	A = G (whatever G is - seems to be a mystery)
+ *	2E 1C and 2E 0C appear to be special
  */
 static int move_op(void)
 {
@@ -1593,56 +1601,93 @@ static int alu4x_op(void)
 }
 
 /* Much like ALU4x but word */
+/*
+ *	TODO:
+ *	CPU 6 appears to make 50-54 (maybe 55) use additional modes using the
+ *	low bits differently to CPU4
+ *
+ *	CPU4 low bits cause weird high/high register behaviour CPU 6 they are
+ *	a pair to select additional modes. FIXME
+ *
+ *	[sr:3][sx1:1][dr:3][sx0:1]
+ *	sx1	sx0
+ *	0	0		(sr)	(dr)		as per CPU4
+ *	0	1		(sr)	((PC))		sr, (xxxx)
+ *	1 	0		(sr)	(PC)		sr, constant
+ *	1	1		((sr))	(dr)		indirect, reg
+ */
 static int alu5x_op(void)
 {
 	unsigned src, dst;
+	unsigned addr;
+	unsigned srcv;
+	unsigned dsta;
 	if (!(op & 0x08)) {
 		dst = fetch();
-		if (dst & 0x11) {
-			fprintf(stderr,
-				"ALU5 - unknown reg encoding %02X at %04X\n",
-				dst, exec_pc);
-			exit(1);
-		}
 		src = dst >> 4;
-		dst &= 0x0F;
+		srcv = regpair_read(src & 0x0E);
+		dsta = regpair_addr(dst & 0x0E);
+		if (op <= 0x55) {
+			switch(dst & 0x11) {
+			case 0x00:
+				break;
+			case 0x01:
+				addr = fetch() << 8;
+				addr |= fetch();
+				srcv = mmu_mem_read16(addr);
+				break;
+			case 0x10:
+				srcv = fetch() << 8;
+				srcv |= fetch();
+				break;
+			case 0x11:
+				addr = fetch() << 8;
+				addr |= fetch();
+				dsta = addr;
+				break;
+			}
+		}
+	} else {
+		srcv = regpair_read(A);
+		dsta = regpair_addr(B);
 	}
 	switch (op) {
 	case 0x50:		/* add */
-		return add16(dst, src);
+		return add16(dsta, srcv);
 	case 0x51:		/* sub */
-		return sub16(dst, src);
+		return sub16(dsta, srcv);
 	case 0x52:		/* and */
-		return and16(dst, src);
+		return and16(dsta, srcv);
 	case 0x53:		/* or */
-		return or16(dst, src);
+		return or16(dsta, srcv);
 	case 0x54:		/* xor */
-		return xor16(dst, src);
+		return xor16(dsta, srcv);
 	case 0x55:		/* mov */
-		return mov16(dst, src);
+		return mov16(dsta, srcv);
 	case 0x56:		/* unused */
 	case 0x57:		/* unused */
 		fprintf(stderr, "Unknown ALU5 op %02X at %04X\n", op,
 			exec_pc);
 		return 0;
 	case 0x58:
-		return add16(B, A);
+		return add16(dsta, srcv);
 	case 0x59:
-		return sub16(B, A);
+		return sub16(dsta, srcv);
 	case 0x5A:
-		return and16(B, A);
-	case 0x5B:		/* Microcode and 86D7 suggest not an or16 */
-		/* return or16(B, A); */
-		return mov16(X, A);
-		/* These are borrowed for moves */
+		return and16(dsta, srcv);
+	/* These are borrowed for moves */
+	case 0x5B:
+		return mov16(regpair_addr(X), srcv);
 	case 0x5C:
-		return mov16(Y, A);
+		return mov16(regpair_addr(Y), srcv);
 	case 0x5D:
-		return mov16(B, A);
+		return mov16(regpair_addr(B), srcv);
 	case 0x5E:
-		return mov16(Z, A);
+		return mov16(regpair_addr(Z), srcv);
 	case 0x5F:
-		return mov16(S, A);
+		fprintf(stderr, "srcv %x regpair_addr(%x)\n", srcv,
+			regpair_addr(S));
+		return mov16(regpair_addr(S), srcv);
 	default:
 		fprintf(stderr, "internal error alu5\n");
 		exit(1);
@@ -1769,7 +1814,10 @@ static void disaddr(unsigned rpc, unsigned size, unsigned op,
 {
 	switch (op) {
 	case 0:
-		dis16d(rpc);
+		if (size == 1)
+			fprintf(stderr, "%02X\n", mmu_mem_read8_debug(rpc));
+		else
+			dis16d(rpc);
 		break;
 	case 1:
 		if (!isjump)
@@ -1964,8 +2012,26 @@ static void disassemble(unsigned op)
 	/* 4E 4F mystery */
 	if (op < 0x56) {
 		uint8_t v = mmu_mem_read8(rpc);
-		fprintf(stderr, "%s %s, %s\n", alu2name[op & 7],
-			r16name(v >> 4), r16name(v));
+		uint8_t f = v & 0x11;
+		v &= 0xEE;
+		switch(f) {
+		case 0x00:
+			fprintf(stderr, "%s %s, %s\n", alu2name[op & 7],
+				r16name(v >> 4), r16name(v));
+			break;
+		case 0x01:
+			fprintf(stderr, "%s %s, (%X)\n", alu2name[op & 7],
+				r16name(v >> 4), get16d(rpc + 1));
+			break;
+		case 0x10:
+			fprintf(stderr, "%s %s, %X\n", alu2name[op & 7],
+				r16name(v >> 4), get16d(rpc + 1));
+			break;
+		case 0x11:
+			fprintf(stderr, "%s (%X), %s\n", alu2name[op & 7],
+				get16d(rpc + 1), r16name(v));
+			break;
+		}
 		return;
 	}
 	/* TODO 46 47 */
@@ -2063,7 +2129,7 @@ unsigned cpu6_halted(void)
  */
 void cpu6_init(void)
 {
-	uint8_t *mp = mmu;
+	uint8_t *mp = mmu[0];
 	unsigned i = 0;
 	for (i = 0; i < 30; i++)
 		*mp++ = i;
