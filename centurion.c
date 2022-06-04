@@ -284,7 +284,7 @@ static void hawk_position(void)
 
 	offset *= 2;
 	offset += head;
-	offset *= 14;		/* 14 or 16.. we don't know at the moment */
+	offset *= 16;		/* According to Ken, 16 spt */
 	offset += sec;
 	offset *= 400;
 
