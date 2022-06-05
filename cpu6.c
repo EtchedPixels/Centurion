@@ -1284,6 +1284,8 @@ static int move_op(void)
  *
  *	4,6,7 we don't know but 6,7 are not used for load/store and 4 is
  *	an indirect so is perhaps mmu_mem_read16(mmu_mem_read16(fetch16()));
+ *
+ *	7E and 7F are repurposed as multi register push/pop on CPU6
  */
 static int jump_op(void)
 {
@@ -1298,22 +1300,39 @@ static int jump_op(void)
 		reg_write(CH, old_ipl);
 		return 0;
 	}
-	/* Unclear. From the MMU test code use of X at appears that
-	  7E45 saves X somewhere and 7F45 gets it back (45 is XH,XL interestingly)
-	  However we've already got stx (-s) and ldx(s+_) ? but we don't have
-	  it for other regs */
 	if (op == 0x7E) {
-		/* Somewhat speculative and we've no idea on orders or
-		   if the 4 is the regpair and 5 means somthing else */
+		/* Push a block of registers given the last register to push
+		   and the count */
 		uint8_t r = fetch();
-		pushbyte(reg_read(r >> 4));
-		pushbyte(reg_read(r & 0x0F));
+		uint8_t c = (r & 0x0F);
+		unsigned addr = regpair_read(S);
+		r >>= 4;
+		/* We push the highest one first */
+		r += c;
+		r &= 0x0F;
+		c++;
+		/* A push of S will use the original S before the push insn. */
+		while(c--) {
+			mmu_mem_write8(--addr, reg_read(r));
+			r--;
+			r &= 0x0F;
+		}
+		regpair_write(S, addr);
 		return 0;
 	}
 	if (op == 0x7F) {
+		/* Pop a block of registers given the first register and count */
 		uint8_t r = fetch();
-		reg_write(r & 0x0F, popbyte());
-		reg_write(r >> 4, popbyte());
+		uint8_t c = (r & 0x0F) + 1;
+		unsigned addr = regpair_read(S);
+		r >>= 4;
+		/* A pop of S will always update S at the end */
+		while(c--) {
+			reg_write(r, mmu_mem_read8(addr++));
+			r++;
+			r = r & 0x0F;
+		}
+		regpair_write(S, addr);
 		return 0;
 	}
 	/* We don't know what 0x70 does (it's invalid but I'd guess it jumps
@@ -1333,9 +1352,6 @@ static int jump_op(void)
 
 /*
  *	This appears to work like the other loads and not affect C
- *	It also seems (see diagnostics) not to affect the other flags unlike
- *	an A or B load. That makes sense given you want to pass flags
- *	and often finish with LD RT,(SP)+, RET which would trash them
  */
 static int x_op(void)
 {
@@ -1499,6 +1515,7 @@ static int misc2x_op(void)
 }
 
 /* Like misc2x but word */
+/* TODO; this has some kind of extended mode io CPU6 we don't yet fully understand */
 static int misc3x_op(void)
 {
 	unsigned low = 0;
@@ -1549,7 +1566,7 @@ static int misc3x_op(void)
 }
 
 /* Mostly ALU operations on AL */
-/* We have a very strange operation 47 40 */
+/* 47 is added in CPU5/6 for block operations */
 static int alu4x_op(void)
 {
 	unsigned src, dst;
@@ -1602,12 +1619,11 @@ static int alu4x_op(void)
 
 /* Much like ALU4x but word */
 /*
- *	TODO:
  *	CPU 6 appears to make 50-54 (maybe 55) use additional modes using the
  *	low bits differently to CPU4
  *
  *	CPU4 low bits cause weird high/high register behaviour CPU 6 they are
- *	a pair to select additional modes. FIXME
+ *	a pair to select additional modes.
  *
  *	[sr:3][sx1:1][dr:3][sx0:1]
  *	sx1	sx0
