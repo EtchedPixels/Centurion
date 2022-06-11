@@ -27,6 +27,7 @@ volatile unsigned int emulator_done;
 #define TRACE_CPU	4
 #define TRACE_FDC	8
 #define TRACE_CMD	16
+#define TRACE_PARITY	32
 
 unsigned int trace = 0;
 
@@ -90,6 +91,7 @@ static unsigned int next_char(void)
 /* 18 bit address space it seems if the top mmu bit is not used. Allocate
    for the case it is for now */
 static uint8_t mem[0x80000];
+static uint8_t memclean[0x80000];
 
 static uint8_t hexdigits;
 static unsigned hexblank;
@@ -882,13 +884,23 @@ static uint32_t remap(uint32_t addr)
 
 static uint8_t do_mem_read8(uint32_t addr, int dis)
 {
+	unsigned parity_off = 0;
+
 	if (addr >= 0x3F000 && addr < 0x3FC00) {
 		if (dis)
 			return 0xFF;
 		else
 			return io_read8(addr & 0xFFFF);
 	} else {
+		if (diag && addr >= 0x8000)
+			parity_off = 1;
 		addr = remap(addr);
+		if (addr >= 0x3F000)
+			parity_off = 1;
+		if (memclean[addr] || parity_off)
+			return mem[addr];
+		if (trace & TRACE_PARITY)
+			fprintf(stderr, "PARITY\n");
 		return mem[addr];
 	}
 }
@@ -928,6 +940,7 @@ void mem_write8(uint32_t addr, uint8_t val)
 		return;
 	}
 	addr = remap(addr);
+	memclean[addr] = 1;
 	mem[addr] = val;
 }
 
