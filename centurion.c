@@ -1120,7 +1120,6 @@ int main(int argc, char *argv[])
 			if (dma_read_cycle(cmd_dma_cmd_out()))
 				cmd_dma_cmd_out_done();
 		}
-		usleep(1);
 	}
 	return 0;
 }

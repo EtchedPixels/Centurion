@@ -944,7 +944,6 @@ static int xor16(unsigned dsta, unsigned srcv)
 
 static int mov16(unsigned dsta, unsigned srcv)
 {
-	fprintf(stderr, "write16 %x %x\n", dsta, srcv);
 	mmu_mem_write16(dsta, srcv);
 	logic_flags16(srcv);
 	return 0;
