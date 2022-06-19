@@ -833,6 +833,8 @@ int main(int argc, char *argv[])
 	int opt;
 	unsigned port = 0;
 
+	mux_init();
+
 	while ((opt = getopt(argc, argv, "dFl:s:S:t:")) != -1) {
 		switch (opt) {
 		case 'd':

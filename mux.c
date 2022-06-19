@@ -12,10 +12,7 @@
 #include "centurion.h"
 #include "mux.h"
 
-static int in_fd = 0;
-static int out_fd = 1;
-static int sock_fd;
-static int max_fd = 2;
+static int max_fd;
 
 static struct termios saved_term, term;
 
@@ -28,6 +25,20 @@ static void cleanup(int sig)
 static void exit_cleanup(void)
 {
 	tcsetattr(0, TCSADRAIN, &saved_term);
+}
+
+static struct MuxUnit mux[NUM_MUX_UNITS];
+
+// Set the initial state for all out ports
+void mux_init(void)
+{
+        int i;
+
+        for (i = 0; i < NUM_MUX_UNITS; i++) {
+                mux[i].in_fd = -1;
+                mux[i].out_fd = -1;
+                mux[i].lastc = 0xFF;
+        }
 }
 
 void tty_init(void)
@@ -46,11 +57,17 @@ void tty_init(void)
 		term.c_cc[VSTOP] = 0;
 		tcsetattr(0, TCSADRAIN, &term);
 	}
+
+        mux[0].in_fd = STDIN_FILENO;
+        mux[0].out_fd = STDOUT_FILENO;
+        max_fd = 2;
 }
 
 void net_init(unsigned short port)
 {
 	struct sockaddr_in sin;
+        int sock_fd, io_fd;
+
 	sock_fd = socket(AF_INET, SOCK_STREAM, 0);
 	if (sock_fd == -1) {
 		perror("socket");
@@ -69,29 +86,35 @@ void net_init(unsigned short port)
 	printf("[Waiting terminal connection...]\n");
 	fflush(stdout);
 
-	in_fd = accept(sock_fd, NULL, NULL);
-	if (in_fd == -1) {
+	io_fd = accept(sock_fd, NULL, NULL);
+	if (io_fd == -1) {
 		perror("accept");
 		exit(1);
 	}
 	close(sock_fd);
-	fcntl(in_fd, F_SETFL, FNDELAY);
-	out_fd = in_fd;
-	max_fd = out_fd + 1;
+	fcntl(io_fd, F_SETFL, FNDELAY);
+	max_fd = io_fd + 1;
+
+        mux[0].in_fd = io_fd;
+	mux[0].out_fd = io_fd;
 }
 
 
 /* Utility functions for the mux */
-static unsigned int check_chario(void)
+static unsigned int check_chario(uint8_t unit)
 {
 	fd_set i, o;
 	struct timeval tv;
 	unsigned int r = 0;
 
+        if (mux[unit].in_fd == -1 || mux[unit].out_fd == -1) {
+                return r;
+        }
+
 	FD_ZERO(&i);
-	FD_SET(in_fd, &i);
+	FD_SET(mux[unit].in_fd, &i);
 	FD_ZERO(&o);
-	FD_SET(out_fd, &o);
+	FD_SET(mux[unit].out_fd, &o);
 	tv.tv_sec = 0;
 	tv.tv_usec = 0;
 
@@ -101,33 +124,36 @@ static unsigned int check_chario(void)
 		perror("select");
 		exit(1);
 	}
-	if (FD_ISSET(in_fd, &i))
+	if (FD_ISSET(mux[unit].in_fd, &i))
 		r |= 1;
-	if (FD_ISSET(out_fd, &o))
+	if (FD_ISSET(mux[unit].out_fd, &o))
 		r |= 2;
 	return r;
 }
 
-static unsigned int next_char(void)
+static unsigned int next_char(uint8_t unit)
 {
-	static unsigned char lastc = 0xFF;
 	int r;
 
-	r = read(in_fd, &lastc, 1);
+        if (mux[unit].in_fd == -1) {
+                return mux[unit].lastc;
+        }
+
+	r = read(mux[unit].in_fd, &mux[unit].lastc, 1);
 
 	if (r == 0) {
 		emulator_done = 1;
-		return lastc;
+		return mux[unit].lastc;
 	}
 
 	if (r < 0) {
 		/* Someone read the port when nothing there */
 		if (errno == EAGAIN || errno == EWOULDBLOCK)
-			return lastc;
+			return mux[unit].lastc;
 		perror("next_char");
 		exit(1);
 	}
-	return lastc;
+	return mux[unit].lastc;
 }
 
 /*
@@ -157,29 +183,29 @@ static unsigned int next_char(void)
  *
  */
 
-static uint8_t muxconf[16];
-
-
 /* Bit 0 of control is char pending. The real system uses mark parity so
    we ignore that */
 void mux_write(uint16_t addr, uint8_t val)
 {
-	unsigned mux, data;
+	unsigned unit, data;
 	addr &= 0xFF;
-	mux = (addr >> 1) & 0x0F;
+	unit = (addr >> 1) & 0x0F;
 	data = addr & 1;
 
 	if (!data) {
-		muxconf[mux] = val;
+                // This is mode byte, we currently don't have anything
+                // to do with it.
+                // But if we wanted to operate on a real serial port, we'd need
+                // to change baud rate here.
 		return;
 	}
 
-	if (mux != 0)
+	if (unit >= NUM_MUX_UNITS || mux[unit].out_fd == -1)
 		return;
 
-	if (out_fd > 1) {
+	if (mux[unit].out_fd > 1) {
 		val &= 0x7F;
-		write(out_fd, &val, 1);
+		write(mux[unit].out_fd, &val, 1);
 	} else {
 		val &= 0x7F;
 		if (val != 0x0A && val != 0x0D
@@ -193,22 +219,22 @@ void mux_write(uint16_t addr, uint8_t val)
 
 uint8_t mux_read(uint16_t addr)
 {
-	unsigned mux, data;
+	unsigned unit, data;
 	unsigned ttystate;
 	uint8_t ctrl = 0;
 
 	addr &= 0xFF;
-	mux = addr >> 1;
+	unit = addr >> 1;
 	data = addr & 1;
 
 
-	if (mux != 0)
+	if (unit >= NUM_MUX_UNITS)
 		return 0;
 
 	if (data == 1)
-		return next_char();	/*( | 0x80; */
+		return next_char(unit);	/*( | 0x80; */
 
-	ttystate = check_chario();
+	ttystate = check_chario(unit);
 	if (ttystate & 1)
 		ctrl |= 1;
 	if (ttystate & 2)
