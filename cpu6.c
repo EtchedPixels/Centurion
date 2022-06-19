@@ -186,6 +186,13 @@ uint16_t fetch16(void)
 	return r;
 }
 
+uint16_t fetch_literal(unsigned length)
+{
+	uint16_t addr = pc;
+	pc += length;
+	return addr;
+}
+
 static uint8_t reg_read(uint8_t r)
 {
 	return mmu_mem_read8((cpu_ipl << 4) | r);
@@ -343,9 +350,26 @@ static int block_op47(void)
 {
 	unsigned op = fetch();
 	unsigned len = fetch();
-	unsigned sa = fetch16();
+	unsigned am = op & 0x0F;
+	unsigned sa;
+	unsigned tmp;
+	uint8_t fill;
+        
+	switch (am) {
+	case 0x00:
+		sa = fetch16();
+		break;
+	case 0x0C:
+		// A literal for memset is always 1-byte long
+		tmp = (op == 0x9C) ? 0 : len;
+		sa = fetch_literal(tmp + 1);
+		break;
+	default:
+		fprintf(stderr, "%04X: Unknown addressing mode %02X for block xfer\n", cpu6_pc(), am);
+		return 0;
+	}
 	unsigned da = fetch16();
-	switch(op) {
+	switch(op & 0xF0) {
 	case 0x40:
 		do {
 			mmu_mem_write8(da++, mmu_mem_read8(sa++));
@@ -361,8 +385,14 @@ static int block_op47(void)
 			}
 		} while(len--);
 		return 0;
+	case 0x90:
+	        fill = mmu_mem_read8(sa);
+		do {
+			mmu_mem_write8(da++, fill);
+		} while (len--);
+		return 0;
 	default:
-		fprintf(stderr, "Unknown block xfer %02X\n", op);
+		fprintf(stderr, "%04X: Unknown block xfer %02X\n", cpu6_pc(), op);
 		return 0;
 	}
 }
