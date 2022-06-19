@@ -186,6 +186,13 @@ uint16_t fetch16(void)
 	return r;
 }
 
+uint16_t fetch_literal(unsigned length)
+{
+	uint16_t addr = pc;
+	pc += length;
+	return addr;
+}
+
 static uint8_t reg_read(uint8_t r)
 {
 	return mmu_mem_read8((cpu_ipl << 4) | r);
@@ -343,9 +350,26 @@ static int block_op47(void)
 {
 	unsigned op = fetch();
 	unsigned len = fetch();
-	unsigned sa = fetch16();
+	unsigned am = op & 0x0F;
+	unsigned sa;
+	unsigned tmp;
+	uint8_t fill;
+        
+	switch (am) {
+	case 0x00:
+		sa = fetch16();
+		break;
+	case 0x0C:
+		// A literal for memset is always 1-byte long
+		tmp = (op == 0x9C) ? 0 : len;
+		sa = fetch_literal(tmp + 1);
+		break;
+	default:
+		fprintf(stderr, "%04X: Unknown addressing mode %02X for block xfer\n", cpu6_pc(), am);
+		return 0;
+	}
 	unsigned da = fetch16();
-	switch(op) {
+	switch(op & 0xF0) {
 	case 0x40:
 		do {
 			mmu_mem_write8(da++, mmu_mem_read8(sa++));
@@ -361,8 +385,14 @@ static int block_op47(void)
 			}
 		} while(len--);
 		return 0;
+	case 0x90:
+	        fill = mmu_mem_read8(sa);
+		do {
+			mmu_mem_write8(da++, fill);
+		} while (len--);
+		return 0;
 	default:
-		fprintf(stderr, "Unknown block xfer %02X\n", op);
+		fprintf(stderr, "%04X: Unknown block xfer %02X\n", cpu6_pc(), op);
 		return 0;
 	}
 }
@@ -944,7 +974,6 @@ static int xor16(unsigned dsta, unsigned srcv)
 
 static int mov16(unsigned dsta, unsigned srcv)
 {
-	fprintf(stderr, "write16 %x %x\n", dsta, srcv);
 	mmu_mem_write16(dsta, srcv);
 	logic_flags16(srcv);
 	return 0;
@@ -1424,6 +1453,49 @@ static int storeword_op(void)
 	mmu_mem_write16(addr, r);
 	ldflags16(r);
 
+	return 0;
+}
+
+static int cpu6_indexed_loadstore(void)
+{
+	uint8_t regs = fetch();
+	int8_t offset = fetch();
+	uint8_t reg = regs >> 4;
+	uint16_t addr = regpair_read(regs & 0x0e) + offset;
+
+	if (regs & 1) {
+		mmu_mem_write8(addr, reg_read(reg));
+	} else {
+		reg_write(reg, mmu_mem_read8(addr));
+	}
+	ldflags(reg);
+	return 0;
+}
+
+static void cpu6_il_storebyte(uint8_t ipl, uint8_t r)
+{
+	mmu_mem_write8((ipl << 4) | r, reg_read(r));
+}
+
+static void cpu6_il_loadbyte(uint8_t ipl, uint8_t r)
+{
+	reg_write(r, mmu_mem_read8((ipl << 4) | r));
+}
+
+static int cpu6_il_mov(void)
+{
+	uint8_t byte2 = fetch();
+	uint8_t ipl = byte2 >> 4;
+	uint8_t r = byte2 & 0x0F;
+
+	if (op == 0xd7) {
+		cpu6_il_storebyte(ipl, (r | 1) ^ 1);
+		cpu6_il_storebyte(ipl, r ^ 1);
+	} else {
+		cpu6_il_loadbyte(ipl, (r | 1) ^ 1);
+		cpu6_il_loadbyte(ipl, r ^ 1);
+
+	}
 	return 0;
 }
 
@@ -2118,6 +2190,10 @@ unsigned cpu6_execute_one(unsigned trace)
 		return x_op();
 	if (op < 0x80)
 		return jump_op();
+	if (op == 0xd7 || op == 0xe6)
+		return cpu6_il_mov();
+	if (op == 0xf6)
+		return cpu6_indexed_loadstore();
 	return loadstore_op();
 }
 
