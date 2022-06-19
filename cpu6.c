@@ -1456,6 +1456,49 @@ static int storeword_op(void)
 	return 0;
 }
 
+static int cpu6_indexed_loadstore(void)
+{
+	uint8_t regs = fetch();
+	int8_t offset = fetch();
+	uint8_t reg = regs >> 4;
+	uint16_t addr = regpair_read(regs & 0x0e) + offset;
+
+	if (regs & 1) {
+		mmu_mem_write8(addr, reg_read(reg));
+	} else {
+		reg_write(reg, mmu_mem_read8(addr));
+	}
+	ldflags(reg);
+	return 0;
+}
+
+static void cpu6_il_storebyte(uint8_t ipl, uint8_t r)
+{
+	mmu_mem_write8((ipl << 4) | r, reg_read(r));
+}
+
+static void cpu6_il_loadbyte(uint8_t ipl, uint8_t r)
+{
+	reg_write(r, mmu_mem_read8((ipl << 4) | r));
+}
+
+static int cpu6_il_mov(void)
+{
+	uint8_t byte2 = fetch();
+	uint8_t ipl = byte2 >> 4;
+	uint8_t r = byte2 & 0x0F;
+
+	if (op == 0xd7) {
+		cpu6_il_storebyte(ipl, (r | 1) ^ 1);
+		cpu6_il_storebyte(ipl, r ^ 1);
+	} else {
+		cpu6_il_loadbyte(ipl, (r | 1) ^ 1);
+		cpu6_il_loadbyte(ipl, r ^ 1);
+
+	}
+	return 0;
+}
+
 static int loadstore_op(void)
 {
 	switch (op & 0x30) {
@@ -2147,6 +2190,10 @@ unsigned cpu6_execute_one(unsigned trace)
 		return x_op();
 	if (op < 0x80)
 		return jump_op();
+	if (op == 0xd7 || op == 0xe6)
+		return cpu6_il_mov();
+	if (op == 0xf6)
+		return cpu6_indexed_loadstore();
 	return loadstore_op();
 }
 
