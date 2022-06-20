@@ -1,5 +1,6 @@
 #include <inttypes.h>
 
+#define MUX0_BASE 0xf200
 #define NUM_MUX_UNITS 4
 
 struct MuxUnit

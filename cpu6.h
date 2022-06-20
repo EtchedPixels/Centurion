@@ -37,3 +37,5 @@ extern int dma_write_active(void);
 extern void cpu6_set_switches(unsigned switches);
 extern unsigned cpu6_halted(void);
 extern void cpu6_init(void);
+extern void cpu_assert_irq(unsigned ipl);
+extern void cpu_deassert_irq(unsigned ipl);

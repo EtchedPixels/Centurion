@@ -10,6 +10,7 @@
 #include <arpa/inet.h>
 
 #include "centurion.h"
+#include "cpu6.h"
 #include "mux.h"
 
 static struct termios saved_term, term;
@@ -26,6 +27,7 @@ static void exit_cleanup(void)
 }
 
 static struct MuxUnit mux[NUM_MUX_UNITS];
+static char ipl_request = -1; // Let's suppose -1 = disabled
 
 // Set the initial state for all out ports
 void mux_init(void)
@@ -188,6 +190,16 @@ void mux_write(uint16_t addr, uint8_t val)
 {
 	unsigned unit, data;
 	addr &= 0xFF;
+
+	if (addr == 0x0A) {
+		// Register 0x0A - set interrupt request level
+		ipl_request = val;
+		return;
+	} else if (addr >= NUM_MUX_UNITS * 2) {
+		// Any other out-of-band address, we don't know what to do with it
+		return;
+	}
+
 	unit = (addr >> 1) & 0x0F;
 	data = addr & 1;
 
@@ -196,12 +208,21 @@ void mux_write(uint16_t addr, uint8_t val)
                  * to do with it.
                  * But if we wanted to operate on a real serial port, we'd need
                  * to change baud rate here.
+		 * The code we have (diag test #6 and WIPL) loves to reset it every time.
+		 * I have also never seen clearing register 0x0A; so i assume it also
+		 * disables interrupt generation until requested explicitly.
 		 */
+		if (ipl_request != -1) {
+			cpu_deassert_irq(ipl_request);
+			ipl_request = -1;
+		}
 		return;
 	}
 
-	if (unit >= NUM_MUX_UNITS || mux[unit].out_fd == -1)
+	if (mux[unit].out_fd == -1) {
+		/* This MUX unit isn't connected to anything */
 		return;
+	}
 
 	if (mux[unit].out_fd > 1) {
 		val &= 0x7F;
@@ -209,7 +230,7 @@ void mux_write(uint16_t addr, uint8_t val)
 	} else {
 		val &= 0x7F;
 		if (val != 0x0A && val != 0x0D
-		    && (val < 0x20 || val == 0x7F))
+		&& (val < 0x20 || val == 0x7F))
 			printf("[%02X]", val);
 		else
 			putchar(val);
@@ -222,11 +243,25 @@ uint8_t mux_read(uint16_t addr)
 	unsigned unit, data;
 
 	addr &= 0xFF;
+
+	if (addr == 0x0F) {
+		/* Reading from 0x0F supposedly ACKs the interrupt */
+		if (ipl_request != -1) {
+			cpu_deassert_irq(ipl_request);
+		}
+		/* The F1 test also checks the value and ignores the interrupt
+		 * (does not read the character) if nonzero value arrives. Perhaps
+		 * this has to do with daisy-chaining, but we don't know; WIPL
+		 * does not test the value
+		 */
+		return 0;
+	} else if (addr >= NUM_MUX_UNITS * 2) {
+		// Any other out-of-band address, we don't know what to do with it
+		return 0;
+	}
+
 	unit = addr >> 1;
 	data = addr & 1;
-
-	if (unit >= NUM_MUX_UNITS)
-		return 0;
 
 	if (data == 1) {
 		/* Reading the data register resets RX_READY */
@@ -266,8 +301,11 @@ void mux_poll(void)
 
 	for (unit = 0; unit < NUM_MUX_UNITS; unit++) {
 		int fd = mux[unit].in_fd;
-		if (fd != -1 && FD_ISSET(fd, &i)) {
-			mux[unit].status |= MUX_RX_READY;
-		}
+		if (fd == -1 || !FD_ISSET(fd, &i))
+			continue;
+		
+		mux[unit].status |= MUX_RX_READY;
+		if (ipl_request != -1)
+			cpu_assert_irq(ipl_request);
 	}
 }

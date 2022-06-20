@@ -1825,6 +1825,21 @@ void cpu6_interrupt(unsigned trace)
 	}
 }
 
+/*
+ * This is an utter crappy hack; in real life multiple IRQs
+ * may be asserted at the same time, so we need to choose an
+ * appropriate pending IPL and manage our state accordingly,
+ * but this will do for now, when we only have one MUX generating
+ * a single IRQ.
+ */
+void cpu_assert_irq(unsigned ipl) {
+	pending_ipl = ipl;
+}
+
+void cpu_deassert_irq(unsigned ipl) {
+	pending_ipl = 0;
+}
+
 /* Disassembler */
 
 static const char *r8map[16] = {
