@@ -12,8 +12,6 @@
 #include "centurion.h"
 #include "mux.h"
 
-static int max_fd;
-
 static struct termios saved_term, term;
 
 static void cleanup(int sig)
@@ -37,6 +35,7 @@ void mux_init(void)
         for (i = 0; i < NUM_MUX_UNITS; i++) {
                 mux[i].in_fd = -1;
                 mux[i].out_fd = -1;
+		mux[i].status = 0;
                 mux[i].lastc = 0xFF;
         }
 }
@@ -60,7 +59,6 @@ void tty_init(void)
 
         mux[0].in_fd = STDIN_FILENO;
         mux[0].out_fd = STDOUT_FILENO;
-        max_fd = 2;
 }
 
 void net_init(unsigned short port)
@@ -93,42 +91,43 @@ void net_init(unsigned short port)
 	}
 	close(sock_fd);
 	fcntl(io_fd, F_SETFL, FNDELAY);
-	max_fd = io_fd + 1;
 
         mux[0].in_fd = io_fd;
 	mux[0].out_fd = io_fd;
 }
 
-
-/* Utility functions for the mux */
-static unsigned int check_chario(uint8_t unit)
-{
-	fd_set i, o;
+static int select_wrapper(int maxfd, fd_set* i, fd_set* o) {
 	struct timeval tv;
-	unsigned int r = 0;
+	int rc;
 
-        if (mux[unit].in_fd == -1 || mux[unit].out_fd == -1) {
-                return r;
-        }
-
-	FD_ZERO(&i);
-	FD_SET(mux[unit].in_fd, &i);
-	FD_ZERO(&o);
-	FD_SET(mux[unit].out_fd, &o);
 	tv.tv_sec = 0;
 	tv.tv_usec = 0;
 
-	if (select(max_fd, &i, &o, NULL, &tv) == -1) {
-		if (errno == EINTR)
-			return 0;
-		perror("select");
+	rc = select(maxfd, i, o, NULL, &tv);
+	if (rc == -1 && errno != EINTR) {
+		perror("select() failed in MUX");
 		exit(1);
 	}
-	if (FD_ISSET(mux[unit].in_fd, &i))
-		r |= 1;
-	if (FD_ISSET(mux[unit].out_fd, &o))
-		r |= 2;
-	return r;
+	return rc;
+}
+
+/* Utility functions for the mux */
+static unsigned int check_write_ready(uint8_t unit)
+{
+	int fd = mux[unit].out_fd;
+	fd_set o;
+
+        if (fd == -1) {
+		/* An unconnected port is always ready */
+                return MUX_TX_READY;
+        }
+
+	FD_ZERO(&o);
+	FD_SET(fd, &o);
+	if (select_wrapper(fd + 1, NULL, &o) == -1) {
+		return 0;
+	}
+	return FD_ISSET(fd, &o) ? MUX_TX_READY : 0;
 }
 
 static unsigned int next_char(uint8_t unit)
@@ -193,10 +192,11 @@ void mux_write(uint16_t addr, uint8_t val)
 	data = addr & 1;
 
 	if (!data) {
-                // This is mode byte, we currently don't have anything
-                // to do with it.
-                // But if we wanted to operate on a real serial port, we'd need
-                // to change baud rate here.
+                /* This is mode byte, we currently don't have anything
+                 * to do with it.
+                 * But if we wanted to operate on a real serial port, we'd need
+                 * to change baud rate here.
+		 */
 		return;
 	}
 
@@ -220,24 +220,54 @@ void mux_write(uint16_t addr, uint8_t val)
 uint8_t mux_read(uint16_t addr)
 {
 	unsigned unit, data;
-	unsigned ttystate;
-	uint8_t ctrl = 0;
 
 	addr &= 0xFF;
 	unit = addr >> 1;
 	data = addr & 1;
 
-
 	if (unit >= NUM_MUX_UNITS)
 		return 0;
 
-	if (data == 1)
+	if (data == 1) {
+		/* Reading the data register resets RX_READY */
+		mux[unit].status &= ~MUX_RX_READY;
 		return next_char(unit);	/*( | 0x80; */
+	}
 
-	ttystate = check_chario(unit);
-	if (ttystate & 1)
-		ctrl |= 1;
-	if (ttystate & 2)
-		ctrl |= 2;
-	return ctrl;
+	return mux[unit].status | check_write_ready(unit);
+}
+
+void mux_poll(void)
+{
+	fd_set i;
+	int max_fd = 0;
+	int unit;
+
+	FD_ZERO(&i);
+
+	for (unit = 0; unit < NUM_MUX_UNITS; unit++) {
+		if (mux[unit].status & MUX_RX_READY) {
+			/* Do not waste time repetitively polling ports,
+			 * which we know are ready
+			 */
+			continue;
+		}
+		int fd = mux[unit].in_fd;
+	    	if (fd == -1)
+			continue;
+	    	FD_SET(fd, &i);
+	    	if (fd >= max_fd)
+	    		max_fd = fd + 1;
+	}
+
+	if (max_fd == 0 || select_wrapper(max_fd, &i, NULL) == -1) {
+		return;
+	}
+
+	for (unit = 0; unit < NUM_MUX_UNITS; unit++) {
+		int fd = mux[unit].in_fd;
+		if (fd != -1 && FD_ISSET(fd, &i)) {
+			mux[unit].status |= MUX_RX_READY;
+		}
+	}
 }

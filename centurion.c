@@ -885,6 +885,7 @@ int main(int argc, char *argv[])
 		cpu6_execute_one(trace & TRACE_CPU);
 		if (cpu6_halted())
 			halt_system();
+		/* Service DMA */
 		if (hawk_dma == 1) {
 			if (dma_read_cycle(hawk_read_next()))
 				hawk_dma_done();
@@ -916,6 +917,8 @@ int main(int argc, char *argv[])
 			if (dma_read_cycle(cmd_dma_cmd_out()))
 				cmd_dma_cmd_out_done();
 		}
+		/* Update peripherals state */
+		mux_poll();
 	}
 	return 0;
 }
