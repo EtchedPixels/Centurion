@@ -50,6 +50,7 @@ void tty_init(void)
 		signal(SIGINT, cleanup);
 		signal(SIGQUIT, cleanup);
 		signal(SIGPIPE, cleanup);
+		term.c_iflag &= ~ICRNL;
 		term.c_lflag &= ~(ICANON | ECHO);
 		term.c_cc[VMIN] = 0;
 		term.c_cc[VTIME] = 1;
@@ -160,6 +161,9 @@ static unsigned int next_char(uint8_t unit)
 		/* Some terminals (like Cygwin) send DEL on Backspace */
 		c = 0x08;
 	}
+
+	if (c == 0x0A)
+		fprintf(stderr, "Caught!\n");
 
 	mux[unit].lastc = c;
 	return c;
