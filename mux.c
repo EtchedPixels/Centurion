@@ -135,12 +135,13 @@ static unsigned int check_write_ready(uint8_t unit)
 static unsigned int next_char(uint8_t unit)
 {
 	int r;
+	unsigned char c;
 
         if (mux[unit].in_fd == -1) {
                 return mux[unit].lastc;
         }
 
-	r = read(mux[unit].in_fd, &mux[unit].lastc, 1);
+	r = read(mux[unit].in_fd, &c, 1);
 
 	if (r == 0) {
 		emulator_done = 1;
@@ -154,7 +155,14 @@ static unsigned int next_char(uint8_t unit)
 		perror("next_char");
 		exit(1);
 	}
-	return mux[unit].lastc;
+
+	if (c == 0x7F) {
+		/* Some terminals (like Cygwin) send DEL on Backspace */
+		c = 0x08;
+	}
+
+	mux[unit].lastc = c;
+	return c;
 }
 
 /*
@@ -229,8 +237,8 @@ void mux_write(uint16_t addr, uint8_t val)
 		write(mux[unit].out_fd, &val, 1);
 	} else {
 		val &= 0x7F;
-		if (val != 0x0A && val != 0x0D
-		&& (val < 0x20 || val == 0x7F))
+		if (val != 0x08 && val != 0x0A && val != 0x0D
+		    && (val < 0x20 || val == 0x7F))
 			printf("[%02X]", val);
 		else
 			putchar(val);
