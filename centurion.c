@@ -18,12 +18,13 @@ static unsigned finch;		/* Finch or original FDC */
 
 volatile unsigned int emulator_done;
 
-#define TRACE_MEM	1
-#define TRACE_MEM_REG	2
-#define TRACE_CPU	4
-#define TRACE_FDC	8
-#define TRACE_CMD	16
-#define TRACE_PARITY	32
+#define TRACE_MEM_RD	1
+#define TRACE_MEM_WR	2
+#define TRACE_MEM_REG	4
+#define TRACE_CPU	8
+#define TRACE_FDC	16
+#define TRACE_CMD	32
+#define TRACE_PARITY	64
 
 unsigned int trace = 0;
 
@@ -765,7 +766,7 @@ static uint8_t do_mem_read8(uint32_t addr, int dis)
 uint8_t mem_read8(uint32_t addr)
 {
 	uint8_t r = do_mem_read8(addr, 0);
-	if (trace & TRACE_MEM)
+	if (trace & TRACE_MEM_RD)
 		if (addr > 0xFF || (trace & TRACE_MEM_REG))
 			fprintf(stderr, "%04X: %05X R %02X\n", cpu6_pc(),
 				addr, r);
@@ -779,7 +780,7 @@ uint8_t mem_read8_debug(uint32_t addr)
 
 void mem_write8(uint32_t addr, uint8_t val)
 {
-	if (trace & TRACE_MEM)
+	if (trace & TRACE_MEM_WR)
 		if (addr > 0xFF || (trace & TRACE_MEM_REG))
 			fprintf(stderr, "%04X: %05X W %02X\n", cpu6_pc(),
 				addr, val);
