@@ -1,0 +1,311 @@
+#include <errno.h>
+#include <fcntl.h>
+#include <signal.h>
+#include <stdio.h>
+#include <stdlib.h>
+#include <termios.h>
+#include <unistd.h>
+#include <sys/select.h>
+#include <sys/socket.h>
+#include <arpa/inet.h>
+
+#include "centurion.h"
+#include "cpu6.h"
+#include "mux.h"
+
+static struct termios saved_term, term;
+
+static void cleanup(int sig)
+{
+	tcsetattr(0, TCSADRAIN, &saved_term);
+	emulator_done = 1;
+}
+
+static void exit_cleanup(void)
+{
+	tcsetattr(0, TCSADRAIN, &saved_term);
+}
+
+static struct MuxUnit mux[NUM_MUX_UNITS];
+static char ipl_request = -1; // Let's suppose -1 = disabled
+
+// Set the initial state for all out ports
+void mux_init(void)
+{
+        int i;
+
+        for (i = 0; i < NUM_MUX_UNITS; i++) {
+                mux[i].in_fd = -1;
+                mux[i].out_fd = -1;
+		mux[i].status = 0;
+                mux[i].lastc = 0xFF;
+        }
+}
+
+void tty_init(void)
+{
+	if (tcgetattr(0, &term) == 0) {
+		saved_term = term;
+		atexit(exit_cleanup);
+		signal(SIGINT, cleanup);
+		signal(SIGQUIT, cleanup);
+		signal(SIGPIPE, cleanup);
+		term.c_lflag &= ~(ICANON | ECHO);
+		term.c_cc[VMIN] = 0;
+		term.c_cc[VTIME] = 1;
+		term.c_cc[VINTR] = 0;
+		term.c_cc[VSUSP] = 0;
+		term.c_cc[VSTOP] = 0;
+		tcsetattr(0, TCSADRAIN, &term);
+	}
+
+        mux[0].in_fd = STDIN_FILENO;
+        mux[0].out_fd = STDOUT_FILENO;
+}
+
+void net_init(unsigned short port)
+{
+	struct sockaddr_in sin;
+        int sock_fd, io_fd;
+
+	sock_fd = socket(AF_INET, SOCK_STREAM, 0);
+	if (sock_fd == -1) {
+		perror("socket");
+		exit(1);
+	}
+	sin.sin_family = AF_INET;
+	sin.sin_addr.s_addr = htonl(0x7F000001);
+	sin.sin_port = htons(port);
+	if (bind(sock_fd, (struct sockaddr *) &sin, sizeof(sin)) == -1) {
+		perror("bind");
+		exit(1);
+	}
+	/* TODO set reuseaddr */
+	listen(sock_fd, 1);
+
+	printf("[Waiting terminal connection...]\n");
+	fflush(stdout);
+
+	io_fd = accept(sock_fd, NULL, NULL);
+	if (io_fd == -1) {
+		perror("accept");
+		exit(1);
+	}
+	close(sock_fd);
+	fcntl(io_fd, F_SETFL, FNDELAY);
+
+        mux[0].in_fd = io_fd;
+	mux[0].out_fd = io_fd;
+}
+
+static int select_wrapper(int maxfd, fd_set* i, fd_set* o) {
+	struct timeval tv;
+	int rc;
+
+	tv.tv_sec = 0;
+	tv.tv_usec = 0;
+
+	rc = select(maxfd, i, o, NULL, &tv);
+	if (rc == -1 && errno != EINTR) {
+		perror("select() failed in MUX");
+		exit(1);
+	}
+	return rc;
+}
+
+/* Utility functions for the mux */
+static unsigned int check_write_ready(uint8_t unit)
+{
+	int fd = mux[unit].out_fd;
+	fd_set o;
+
+        if (fd == -1) {
+		/* An unconnected port is always ready */
+                return MUX_TX_READY;
+        }
+
+	FD_ZERO(&o);
+	FD_SET(fd, &o);
+	if (select_wrapper(fd + 1, NULL, &o) == -1) {
+		return 0;
+	}
+	return FD_ISSET(fd, &o) ? MUX_TX_READY : 0;
+}
+
+static unsigned int next_char(uint8_t unit)
+{
+	int r;
+
+        if (mux[unit].in_fd == -1) {
+                return mux[unit].lastc;
+        }
+
+	r = read(mux[unit].in_fd, &mux[unit].lastc, 1);
+
+	if (r == 0) {
+		emulator_done = 1;
+		return mux[unit].lastc;
+	}
+
+	if (r < 0) {
+		/* Someone read the port when nothing there */
+		if (errno == EAGAIN || errno == EWOULDBLOCK)
+			return mux[unit].lastc;
+		perror("next_char");
+		exit(1);
+	}
+	return mux[unit].lastc;
+}
+
+/*
+ *	Each mux is a 6402 and what appears to be 3 bits of speed
+ *	divider. The 6402 has 5 control lines
+ *	PI	inhibit parity
+ *	SBS	selects 1.5/2bit stop (v 1)
+ *	CLS2/CLS1 set the length to 5 + their binary pair value
+ *	EPE	set for even, clear for odd parity
+ *
+ *	We know C5 is 8N1 (and maybe sets the speed divider too)
+ *	So presumably
+ *	CLS2 CLS1 PI are set and SBS EPE clear. That implies that we've
+ *	got 1 too many 1 bits so speed may be encoded. Possibly
+ *	CLS2 CLS1 SBS EPE PI
+ *
+ *	The upper half of the mux space appears to be controls
+ *	0,1		MUX port 0
+ *	2,3		MUX port 1
+ *	4,5		MUX port 2
+ *	6,7		MUX port 3
+ *
+ *	0A		Interrupt level ?
+ *	0E		Cleared on IRQ test
+ *	0F		read to check for interrupt - NZ = none
+ *
+ *
+ */
+
+/* Bit 0 of control is char pending. The real system uses mark parity so
+   we ignore that */
+void mux_write(uint16_t addr, uint8_t val)
+{
+	unsigned unit, data;
+	addr &= 0xFF;
+
+	if (addr == 0x0A) {
+		// Register 0x0A - set interrupt request level
+		ipl_request = val;
+		return;
+	} else if (addr >= NUM_MUX_UNITS * 2) {
+		// Any other out-of-band address, we don't know what to do with it
+		return;
+	}
+
+	unit = (addr >> 1) & 0x0F;
+	data = addr & 1;
+
+	if (!data) {
+                /* This is mode byte, we currently don't have anything
+                 * to do with it.
+                 * But if we wanted to operate on a real serial port, we'd need
+                 * to change baud rate here.
+		 * The code we have (diag test #6 and WIPL) loves to reset it every time.
+		 * I have also never seen clearing register 0x0A; so i assume it also
+		 * disables interrupt generation until requested explicitly.
+		 */
+		if (ipl_request != -1) {
+			cpu_deassert_irq(ipl_request);
+			ipl_request = -1;
+		}
+		return;
+	}
+
+	if (mux[unit].out_fd == -1) {
+		/* This MUX unit isn't connected to anything */
+		return;
+	}
+
+	if (mux[unit].out_fd > 1) {
+		val &= 0x7F;
+		write(mux[unit].out_fd, &val, 1);
+	} else {
+		val &= 0x7F;
+		if (val != 0x0A && val != 0x0D
+		&& (val < 0x20 || val == 0x7F))
+			printf("[%02X]", val);
+		else
+			putchar(val);
+		fflush(stdout);
+	}
+}
+
+uint8_t mux_read(uint16_t addr)
+{
+	unsigned unit, data;
+
+	addr &= 0xFF;
+
+	if (addr == 0x0F) {
+		/* Reading from 0x0F supposedly ACKs the interrupt */
+		if (ipl_request != -1) {
+			cpu_deassert_irq(ipl_request);
+		}
+		/* The F1 test also checks the value and ignores the interrupt
+		 * (does not read the character) if nonzero value arrives. Perhaps
+		 * this has to do with daisy-chaining, but we don't know; WIPL
+		 * does not test the value
+		 */
+		return 0;
+	} else if (addr >= NUM_MUX_UNITS * 2) {
+		// Any other out-of-band address, we don't know what to do with it
+		return 0;
+	}
+
+	unit = addr >> 1;
+	data = addr & 1;
+
+	if (data == 1) {
+		/* Reading the data register resets RX_READY */
+		mux[unit].status &= ~MUX_RX_READY;
+		return next_char(unit);	/*( | 0x80; */
+	}
+
+	return mux[unit].status | check_write_ready(unit);
+}
+
+void mux_poll(void)
+{
+	fd_set i;
+	int max_fd = 0;
+	int unit;
+
+	FD_ZERO(&i);
+
+	for (unit = 0; unit < NUM_MUX_UNITS; unit++) {
+		if (mux[unit].status & MUX_RX_READY) {
+			/* Do not waste time repetitively polling ports,
+			 * which we know are ready
+			 */
+			continue;
+		}
+		int fd = mux[unit].in_fd;
+	    	if (fd == -1)
+			continue;
+	    	FD_SET(fd, &i);
+	    	if (fd >= max_fd)
+	    		max_fd = fd + 1;
+	}
+
+	if (max_fd == 0 || select_wrapper(max_fd, &i, NULL) == -1) {
+		return;
+	}
+
+	for (unit = 0; unit < NUM_MUX_UNITS; unit++) {
+		int fd = mux[unit].in_fd;
+		if (fd == -1 || !FD_ISSET(fd, &i))
+			continue;
+		
+		mux[unit].status |= MUX_RX_READY;
+		if (ipl_request != -1)
+			cpu_assert_irq(ipl_request);
+	}
+}

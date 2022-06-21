@@ -27,6 +27,8 @@
 
 extern uint8_t mem_read8(uint32_t addr);
 extern uint8_t mem_read8_debug(uint32_t addr);
+extern uint8_t mmu_mem_read8(uint16_t addr);
+extern uint8_t mmu_mem_read8_debug(uint16_t addr);
 extern void mem_write8(uint32_t addr, uint8_t val);
 extern void halt_system(void);
 extern uint16_t cpu6_pc(void);
@@ -37,3 +39,5 @@ extern int dma_write_active(void);
 extern void cpu6_set_switches(unsigned switches);
 extern unsigned cpu6_halted(void);
 extern void cpu6_init(void);
+extern void cpu_assert_irq(unsigned ipl);
+extern void cpu_deassert_irq(unsigned ipl);
