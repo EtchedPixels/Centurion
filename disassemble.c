@@ -205,6 +205,30 @@ static const char *ldst[] = {
 	"STBB ", "STB "
 };
 
+static void stack_op(const char *op, unsigned rpc)
+{
+        uint8_t byte2 = mmu_mem_read8_debug(rpc);
+        uint8_t r = byte2 >> 4;
+        uint8_t end = r + (byte2 & 0x0F) + 1;
+        const char* s = "";
+
+        fprintf(stderr, "%s {", op);
+
+        if (r & 1) {
+                fputs(r8map[r], stderr);
+                s = ",";
+        }
+        while (r + 1 < end) {
+                fprintf(stderr, "%s%s", s, r16map[r]);
+                s = ",";
+                r += 2;
+        }
+        if (r < end) {
+                fprintf(stderr, "%s%s", s, r8map[r]);
+        }
+        fputs("}\n", stderr);
+}
+
 void disassemble(unsigned op)
 {
 	unsigned rpc = cpu6_pc() + 1;
@@ -318,6 +342,14 @@ void disassemble(unsigned op)
 		disaddr(rpc, 2, op & 7, 1);
 		return;
 	}
+        if (op == 0x7e) {
+                stack_op("PUSH", rpc);
+                return;
+        }
+        if (op == 0x7f) {
+                stack_op("POP", rpc);
+                return;
+        }
 	if (op < 0x80) {
 		if (op == 0x76) {
 			fputs("SYSCALL?\n", stderr);
