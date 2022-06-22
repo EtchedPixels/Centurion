@@ -11,6 +11,7 @@
 #include <errno.h>
 
 #include "centurion.h"
+#include "console.h"
 #include "cpu6.h"
 #include "mux.h"
 
