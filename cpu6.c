@@ -1472,14 +1472,14 @@ static int cpu6_indexed_loadstore(void)
 	return 0;
 }
 
-static void cpu6_il_storebyte(uint8_t ipl, uint8_t r)
+static void cpu6_il_storebyte(uint8_t ipl, uint8_t rd, uint8_t rs)
 {
-	mmu_mem_write8((ipl << 4) | r, reg_read(r));
+	mmu_mem_write8((ipl << 4) | rd, reg_read(rs));
 }
 
-static void cpu6_il_loadbyte(uint8_t ipl, uint8_t r)
+static void cpu6_il_loadbyte(uint8_t ipl, uint8_t rs, uint8_t rd)
 {
-	reg_write(r, mmu_mem_read8((ipl << 4) | r));
+	reg_write(rd, mmu_mem_read8((ipl << 4) | rs));
 }
 
 static int cpu6_il_mov(void)
@@ -1489,11 +1489,11 @@ static int cpu6_il_mov(void)
 	uint8_t r = byte2 & 0x0F;
 
 	if (op == 0xd7) {
-		cpu6_il_storebyte(ipl, (r | 1) ^ 1);
-		cpu6_il_storebyte(ipl, r ^ 1);
+		cpu6_il_storebyte(ipl, (r | 1) ^ 1, AH);
+		cpu6_il_storebyte(ipl, r ^ 1, AL);
 	} else {
-		cpu6_il_loadbyte(ipl, (r | 1) ^ 1);
-		cpu6_il_loadbyte(ipl, r ^ 1);
+		cpu6_il_loadbyte(ipl, (r | 1) ^ 1, AH);
+		cpu6_il_loadbyte(ipl, r ^ 1, AL);
 
 	}
 	return 0;
