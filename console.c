@@ -80,3 +80,31 @@ void net_init(unsigned short port)
 
         mux_attach(0, io_fd, io_fd);
 }
+
+unsigned int tty_check_writable(int fd)
+{
+	fd_set o;
+
+	FD_ZERO(&o);
+	FD_SET(fd, &o);
+	if (select_wrapper(fd + 1, NULL, &o) == -1) {
+		return 0;
+	}
+	return FD_ISSET(fd, &o);
+}
+
+int select_wrapper(int maxfd, fd_set* i, fd_set* o)
+{
+	struct timeval tv;
+	int rc;
+
+	tv.tv_sec = 0;
+	tv.tv_usec = 0;
+
+	rc = select(maxfd, i, o, NULL, &tv);
+	if (rc == -1 && errno != EINTR) {
+		perror("select() failed in MUX");
+		exit(1);
+	}
+	return rc;
+}

@@ -4,6 +4,7 @@
 #include <unistd.h>
 
 #include "centurion.h"
+#include "console.h"
 #include "cpu6.h"
 #include "mux.h"
 
@@ -29,38 +30,13 @@ void mux_attach(unsigned unit, int in_fd, int out_fd)
 	mux[unit].out_fd = out_fd;
 }
 
-static int select_wrapper(int maxfd, fd_set* i, fd_set* o) {
-	struct timeval tv;
-	int rc;
-
-	tv.tv_sec = 0;
-	tv.tv_usec = 0;
-
-	rc = select(maxfd, i, o, NULL, &tv);
-	if (rc == -1 && errno != EINTR) {
-		perror("select() failed in MUX");
-		exit(1);
-	}
-	return rc;
-}
-
 /* Utility functions for the mux */
 static unsigned int check_write_ready(uint8_t unit)
 {
 	int fd = mux[unit].out_fd;
-	fd_set o;
 
-        if (fd == -1) {
-		/* An unconnected port is always ready */
-                return MUX_TX_READY;
-        }
-
-	FD_ZERO(&o);
-	FD_SET(fd, &o);
-	if (select_wrapper(fd + 1, NULL, &o) == -1) {
-		return 0;
-	}
-	return FD_ISSET(fd, &o) ? MUX_TX_READY : 0;
+	/* An unconnected port is always ready */
+	return (fd == -1 || tty_check_writable(fd)) ? MUX_TX_READY : 0;
 }
 
 static unsigned int next_char(uint8_t unit)
@@ -91,9 +67,6 @@ static unsigned int next_char(uint8_t unit)
 		/* Some terminals (like Cygwin) send DEL on Backspace */
 		c = 0x08;
 	}
-
-	if (c == 0x0A)
-		fprintf(stderr, "Caught!\n");
 
 	mux[unit].lastc = c;
 	return c;
@@ -214,6 +187,36 @@ uint8_t mux_read(uint16_t addr)
 	return mux[unit].status | check_write_ready(unit);
 }
 
+static void set_read_ready(unsigned unit)
+{
+	mux[unit].status |= MUX_RX_READY;
+	if (ipl_request != -1)
+		cpu_assert_irq(ipl_request);
+}
+
+#ifdef WIN32
+
+void mux_poll(void)
+{
+	int unit;
+
+	for (unit = 0; unit < NUM_MUX_UNITS; unit++) {
+		if (mux[unit].status & MUX_RX_READY) {
+			/* Do not waste time repetitively polling ports,
+			 * which we know are ready
+			 */
+			continue;
+		}
+		int fd = mux[unit].in_fd;
+
+	    	if (fd != -1 && tty_check_readable(fd)) {
+			set_read_ready(unit);
+		}
+	}
+}
+
+#else
+
 void mux_poll(void)
 {
 	fd_set i;
@@ -243,11 +246,10 @@ void mux_poll(void)
 
 	for (unit = 0; unit < NUM_MUX_UNITS; unit++) {
 		int fd = mux[unit].in_fd;
-		if (fd == -1 || !FD_ISSET(fd, &i))
-			continue;
-		
-		mux[unit].status |= MUX_RX_READY;
-		if (ipl_request != -1)
-			cpu_assert_irq(ipl_request);
+
+		if (fd != -1 && FD_ISSET(fd, &i))
+			set_read_ready(unit);
 	}
 }
+
+#endif
