@@ -867,9 +867,9 @@ static int inc16(unsigned reg, unsigned val)
 	return 0;
 }
 
-static int dec16(unsigned reg)
+static int dec16(unsigned reg, unsigned val)
 {
-	uint16_t r = regpair_read(reg) - 1;
+	uint16_t r = regpair_read(reg) - val;
 	regpair_write(reg, r);
 	alu_out &= ~(ALU_L | ALU_V | ALU_M | ALU_F);
 	if ((r & 0xFFFF) == 0)
@@ -1654,7 +1654,7 @@ static int misc3x_op(void)
 	case 0x30:
 		return inc16(reg, low + 1);
 	case 0x31:
-		return dec16(reg);
+		return dec16(reg, low + 1);
 	case 0x32:
 		return clr16(reg, low);
 	case 0x33:
@@ -1670,7 +1670,7 @@ static int misc3x_op(void)
 	case 0x38:
 		return inc16(A, 1);
 	case 0x39:
-		return dec16(A);
+		return dec16(A, 1);
 	case 0x3A:
 		return clr16(A, 0);
 	case 0x3B:
@@ -1682,7 +1682,7 @@ static int misc3x_op(void)
 	case 0x3E:
 		return inc16(X, 1);
 	case 0x3F:
-		return dec16(X);
+		return dec16(X, 1);
 	default:
 		fprintf(stderr, "internal error misc3\n");
 		exit(1);
