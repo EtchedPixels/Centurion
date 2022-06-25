@@ -337,6 +337,65 @@ static int mmu_loadop(uint8_t subop)
 	return 0;
 }
 
+static uint8_t block_op_getLen(int inst, int op) {
+	if ((op & 0xF0) == 0x00) // binload doesn't take a length
+		return 0;
+
+	if (inst == 0x47) {
+		// 47 instructions take a literal
+		return fetch();
+	} else {
+		// 67 instructions take the length in AL
+		// We aren't 100% sure that this takes AL instead of A
+		// But code that needs a 16bit memcpy seems to use F7 instead
+		return reg_read(AL);
+	}
+}
+
+static unsigned twobit_cached_reg = 0;
+
+static uint16_t get_twobit(unsigned mode, unsigned idx, unsigned len) {
+	uint16_t addr = 0;
+	unsigned regs;
+	unsigned thismode = mode;
+
+	if (idx == 1)
+		thismode = mode >> 2;
+
+	switch (thismode & 0x3)	{
+	case 0:
+		// EA <- PC
+		addr = fetch16();
+		break;
+	case 1:
+		// EA <- imm8/imm16 + r1 + r2
+		regs = fetch();
+		addr =  (regs & 0x10) ? fetch16() : fetch(); // if r1 is odd, do imm16
+		addr += regpair_read((regs >> 4) & 0xe);
+		if ((regs & 0xe) != 0) { // ignore r2 if it's A
+			addr += regpair_read(regs & 0xe);
+		}
+		break;
+	case 2:
+		// EA <- R
+		// This mode is complicated because it tries to merge two mode 2s into a single byte
+		if (idx == 1 && mode == 0xa) {
+			// previous twobit already fetched our regbyte
+			regs = twobit_cached_reg;
+		} else {
+			twobit_cached_reg = regs = fetch();
+		}
+		if (idx == 1)
+			regs >>= 4;
+		addr = reg_read(regs & 0xe);
+		break;
+	case 3:
+		addr = fetch_literal(len);
+		break;
+	}
+	return addr;
+}
+
 /*
  *	Block operations ?
  *
@@ -346,34 +405,27 @@ static int mmu_loadop(uint8_t subop)
  *	We don't know what the other bits do - eg are they addressing
  *	mode bits ?
  */
-static int block_op47(void)
+static int block_op(int inst)
 {
 	unsigned op = fetch();
-	unsigned len = fetch();
 	unsigned am = op & 0x0F;
-	unsigned sa;
-	unsigned tmp;
+	unsigned dst_len = block_op_getLen(inst, op);
+	unsigned src_len = dst_len;
+	uint16_t sa, da;
 	uint8_t fill;
-        
-	switch (am) {
-	case 0x00:
-		sa = fetch16();
-		break;
-	case 0x0C:
-		// A literal for memset is always 1-byte long
-		tmp = (op == 0x9C) ? 0 : len;
-		sa = fetch_literal(tmp + 1);
-		break;
-	default:
-		fprintf(stderr, "%04X: Unknown addressing mode %02X for block xfer\n", cpu6_pc(), am);
-		return 0;
-	}
-	unsigned da = fetch16();
+
+	// memset only reads the source once
+	if ((op & 0xF0) == 0x90)
+		src_len = 1;
+
+	sa = get_twobit(am, 0, src_len);
+	da = get_twobit(am, 1, src_len);
+
 	switch(op & 0xF0) {
 	case 0x40:
 		do {
 			mmu_mem_write8(da++, mmu_mem_read8(sa++));
-		} while(len--);
+		} while(dst_len--);
 		return 0;
 	case 0x80:
 		alu_out |= ALU_V;
@@ -383,13 +435,13 @@ static int block_op47(void)
 				alu_out &= ~ALU_V;
 				break;
 			}
-		} while(len--);
+		} while(dst_len--);
 		return 0;
 	case 0x90:
-	        fill = mmu_mem_read8(sa);
+		fill = mmu_mem_read8(sa);
 		do {
 			mmu_mem_write8(da++, fill);
-		} while (len--);
+		} while (dst_len--);
 		return 0;
 	default:
 		fprintf(stderr, "%04X: Unknown block xfer %02X\n", cpu6_pc(), op);
@@ -1665,7 +1717,7 @@ static int alu4x_op(void)
 			exec_pc);
 		return 0;
 	case 0x47:		/* unused */
-		return block_op47();
+		return block_op(47);
 	case 0x48:
 		return add(BL, AL);
 	case 0x49:
@@ -1870,6 +1922,8 @@ unsigned cpu6_execute_one(unsigned trace)
 		return alu4x_op();
 	if (op < 0x60)
 		return alu5x_op();
+	if (op == 0x67)
+		return block_op(0x67);
 	if (op < 0x70)
 		return x_op();
 	if (op < 0x80)
