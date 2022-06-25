@@ -11,6 +11,7 @@
 #include <errno.h>
 
 #include "centurion.h"
+#include "console.h"
 #include "cpu6.h"
 #include "mux.h"
 
@@ -810,7 +811,7 @@ void halt_system(void)
 
 static void load_rom(const char *name, uint32_t addr, uint16_t len)
 {
-	FILE *fp = fopen(name, "r");
+	FILE *fp = fopen(name, "rb");
 	if (fp == NULL) {
 		perror(name);
 		exit(1);
@@ -878,7 +879,7 @@ int main(int argc, char *argv[])
 	}
 
 	/* We don't worry here is this works or not */
-	hawk_fd = open("hawk.disk", O_RDWR);
+	hawk_fd = open("hawk.disk", O_RDWR|O_BINARY);
 
 	cpu6_init();
 

@@ -16,6 +16,7 @@ struct MuxUnit
 #define MUX_TX_READY (1 << 1)
 
 void mux_init(void);
+void mux_attach(unsigned unit, int in_fd, int out_fd);
 void tty_init(void);
 void net_init(unsigned short port);
 void mux_poll(void);

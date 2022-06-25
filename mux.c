@@ -1,30 +1,12 @@
 #include <errno.h>
-#include <fcntl.h>
-#include <signal.h>
 #include <stdio.h>
 #include <stdlib.h>
-#include <termios.h>
 #include <unistd.h>
-#include <sys/select.h>
-#include <sys/socket.h>
-#include <arpa/inet.h>
 
 #include "centurion.h"
+#include "console.h"
 #include "cpu6.h"
 #include "mux.h"
-
-static struct termios saved_term, term;
-
-static void cleanup(int sig)
-{
-	tcsetattr(0, TCSADRAIN, &saved_term);
-	emulator_done = 1;
-}
-
-static void exit_cleanup(void)
-{
-	tcsetattr(0, TCSADRAIN, &saved_term);
-}
 
 static struct MuxUnit mux[NUM_MUX_UNITS];
 static char ipl_request = -1; // Let's suppose -1 = disabled
@@ -42,95 +24,19 @@ void mux_init(void)
         }
 }
 
-void tty_init(void)
+void mux_attach(unsigned unit, int in_fd, int out_fd)
 {
-	if (tcgetattr(0, &term) == 0) {
-		saved_term = term;
-		atexit(exit_cleanup);
-		signal(SIGINT, cleanup);
-		signal(SIGQUIT, cleanup);
-		signal(SIGPIPE, cleanup);
-		term.c_iflag &= ~ICRNL;
-		term.c_lflag &= ~(ICANON | ECHO);
-		term.c_cc[VMIN] = 0;
-		term.c_cc[VTIME] = 1;
-		term.c_cc[VINTR] = 0;
-		term.c_cc[VSUSP] = 0;
-		term.c_cc[VSTOP] = 0;
-		tcsetattr(0, TCSADRAIN, &term);
-	}
-
-        mux[0].in_fd = STDIN_FILENO;
-        mux[0].out_fd = STDOUT_FILENO;
-}
-
-void net_init(unsigned short port)
-{
-	struct sockaddr_in sin;
-        int sock_fd, io_fd;
-
-	sock_fd = socket(AF_INET, SOCK_STREAM, 0);
-	if (sock_fd == -1) {
-		perror("socket");
-		exit(1);
-	}
-	sin.sin_family = AF_INET;
-	sin.sin_addr.s_addr = htonl(0x7F000001);
-	sin.sin_port = htons(port);
-	if (bind(sock_fd, (struct sockaddr *) &sin, sizeof(sin)) == -1) {
-		perror("bind");
-		exit(1);
-	}
-	/* TODO set reuseaddr */
-	listen(sock_fd, 1);
-
-	printf("[Waiting terminal connection...]\n");
-	fflush(stdout);
-
-	io_fd = accept(sock_fd, NULL, NULL);
-	if (io_fd == -1) {
-		perror("accept");
-		exit(1);
-	}
-	close(sock_fd);
-	fcntl(io_fd, F_SETFL, FNDELAY);
-
-        mux[0].in_fd = io_fd;
-	mux[0].out_fd = io_fd;
-}
-
-static int select_wrapper(int maxfd, fd_set* i, fd_set* o) {
-	struct timeval tv;
-	int rc;
-
-	tv.tv_sec = 0;
-	tv.tv_usec = 0;
-
-	rc = select(maxfd, i, o, NULL, &tv);
-	if (rc == -1 && errno != EINTR) {
-		perror("select() failed in MUX");
-		exit(1);
-	}
-	return rc;
+	mux[unit].in_fd = in_fd;
+	mux[unit].out_fd = out_fd;
 }
 
 /* Utility functions for the mux */
 static unsigned int check_write_ready(uint8_t unit)
 {
 	int fd = mux[unit].out_fd;
-	fd_set o;
 
-        if (fd == -1) {
-		/* An unconnected port is always ready */
-                return MUX_TX_READY;
-        }
-
-	FD_ZERO(&o);
-	FD_SET(fd, &o);
-	if (select_wrapper(fd + 1, NULL, &o) == -1) {
-		return 0;
-	}
-	return FD_ISSET(fd, &o) ? MUX_TX_READY : 0;
+	/* An unconnected port is always ready */
+	return (fd == -1 || tty_check_writable(fd)) ? MUX_TX_READY : 0;
 }
 
 static unsigned int next_char(uint8_t unit)
@@ -161,9 +67,6 @@ static unsigned int next_char(uint8_t unit)
 		/* Some terminals (like Cygwin) send DEL on Backspace */
 		c = 0x08;
 	}
-
-	if (c == 0x0A)
-		fprintf(stderr, "Caught!\n");
 
 	mux[unit].lastc = c;
 	return c;
@@ -241,7 +144,9 @@ void mux_write(uint16_t addr, uint8_t val)
 		write(mux[unit].out_fd, &val, 1);
 	} else {
 		val &= 0x7F;
-		if (val != 0x08 && val != 0x0A && val != 0x0D
+		if (val == 0x06) /* Cursor one position right */
+			printf("\x1b[1C");
+		else if (val != 0x08 && val != 0x0A && val != 0x0D
 		    && (val < 0x20 || val == 0x7F))
 			printf("[%02X]", val);
 		else
@@ -284,6 +189,36 @@ uint8_t mux_read(uint16_t addr)
 	return mux[unit].status | check_write_ready(unit);
 }
 
+static void set_read_ready(unsigned unit)
+{
+	mux[unit].status |= MUX_RX_READY;
+	if (ipl_request != -1)
+		cpu_assert_irq(ipl_request);
+}
+
+#ifdef WIN32
+
+void mux_poll(void)
+{
+	int unit;
+
+	for (unit = 0; unit < NUM_MUX_UNITS; unit++) {
+		if (mux[unit].status & MUX_RX_READY) {
+			/* Do not waste time repetitively polling ports,
+			 * which we know are ready
+			 */
+			continue;
+		}
+		int fd = mux[unit].in_fd;
+
+	    	if (fd != -1 && tty_check_readable(fd)) {
+			set_read_ready(unit);
+		}
+	}
+}
+
+#else
+
 void mux_poll(void)
 {
 	fd_set i;
@@ -313,11 +248,10 @@ void mux_poll(void)
 
 	for (unit = 0; unit < NUM_MUX_UNITS; unit++) {
 		int fd = mux[unit].in_fd;
-		if (fd == -1 || !FD_ISSET(fd, &i))
-			continue;
-		
-		mux[unit].status |= MUX_RX_READY;
-		if (ipl_request != -1)
-			cpu_assert_irq(ipl_request);
+
+		if (fd != -1 && FD_ISSET(fd, &i))
+			set_read_ready(unit);
 	}
 }
+
+#endif
