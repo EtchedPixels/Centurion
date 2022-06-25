@@ -666,9 +666,9 @@ static int inc(unsigned reg, unsigned val)
  *	FF->0 expects !F !L M
  *
  */
-static int dec(unsigned reg)
+static int dec(unsigned reg, unsigned val)
 {
-	uint8_t r = reg_read(reg) - 1;
+	uint8_t r = reg_read(reg) - val;
 	reg_write(reg, r);
 	alu_out &= ~(ALU_L | ALU_V | ALU_M | ALU_F);
 	if (r == 0)
@@ -693,9 +693,9 @@ static int clr(unsigned reg, unsigned v)
 /*
  *	Sets all the flags but rule not clear
  */
-static int not(unsigned reg)
+static int not(unsigned reg, unsigned val)
 {
-	uint8_t r = ~reg_read(reg);
+	uint8_t r = ~reg_read(reg) + val;
 	reg_write(reg, r);
 	logic_flags(r);
 	return 0;
@@ -867,9 +867,9 @@ static int inc16(unsigned reg, unsigned val)
 	return 0;
 }
 
-static int dec16(unsigned reg)
+static int dec16(unsigned reg, unsigned val)
 {
-	uint16_t r = regpair_read(reg) - 1;
+	uint16_t r = regpair_read(reg) - val;
 	regpair_write(reg, r);
 	alu_out &= ~(ALU_L | ALU_V | ALU_M | ALU_F);
 	if ((r & 0xFFFF) == 0)
@@ -889,9 +889,9 @@ static int clr16(unsigned reg, unsigned v)
 	return 0;
 }
 
-static int not16(unsigned reg)
+static int not16(unsigned reg, unsigned val)
 {
-	uint16_t r = ~regpair_read(reg);
+	uint16_t r = (~regpair_read(reg)) + val;
 	regpair_write(reg, r);
 	logic_flags16(r);
 	return 0;
@@ -1601,11 +1601,11 @@ static int misc2x_op(void)
 	case 0x20:
 		return inc(reg, low + 1);
 	case 0x21:
-		return dec(reg);
+		return dec(reg, low + 1);
 	case 0x22:
 		return clr(reg, low);
 	case 0x23:
-		return not(reg);
+		return not(reg, low);
 	case 0x24:
 		return sra(reg, low + 1);
 	case 0x25:
@@ -1617,11 +1617,11 @@ static int misc2x_op(void)
 	case 0x28:
 		return inc(AL, 1);
 	case 0x29:
-		return dec(AL);
+		return dec(AL, 1);
 	case 0x2A:
 		return clr(AL, 0);
 	case 0x2B:
-		return not(AL);
+		return not(AL, 0);
 	case 0x2C:
 		return sra(AL, 1);
 	case 0x2D:
@@ -1639,7 +1639,6 @@ static int misc2x_op(void)
 }
 
 /* Like misc2x but word */
-/* TODO; this has some kind of extended mode io CPU6 we don't yet fully understand */
 static int misc3x_op(void)
 {
 	unsigned low = 0;
@@ -1654,11 +1653,11 @@ static int misc3x_op(void)
 	case 0x30:
 		return inc16(reg, low + 1);
 	case 0x31:
-		return dec16(reg);
+		return dec16(reg, low + 1);
 	case 0x32:
 		return clr16(reg, low);
 	case 0x33:
-		return not16(reg);
+		return not16(reg, low);
 	case 0x34:
 		return sra16(reg, low + 1);
 	case 0x35:
@@ -1670,11 +1669,11 @@ static int misc3x_op(void)
 	case 0x38:
 		return inc16(A, 1);
 	case 0x39:
-		return dec16(A);
+		return dec16(A, 1);
 	case 0x3A:
 		return clr16(A, 0);
 	case 0x3B:
-		return not16(A);
+		return not16(A, 0);
 	case 0x3C:
 		return sra16(A, 1);
 	case 0x3D:
@@ -1682,7 +1681,7 @@ static int misc3x_op(void)
 	case 0x3E:
 		return inc16(X, 1);
 	case 0x3F:
-		return dec16(X);
+		return dec16(X, 1);
 	default:
 		fprintf(stderr, "internal error misc3\n");
 		exit(1);
