@@ -385,9 +385,9 @@ static uint16_t get_twobit(unsigned mode, unsigned idx, unsigned len) {
 		} else {
 			twobit_cached_reg = regs = fetch();
 		}
-		if (idx == 1)
+		if (idx == 0)
 			regs >>= 4;
-		addr = reg_read(regs & 0xe);
+		addr = regpair_read(regs & 0xe);
 		break;
 	case 3:
 		addr = fetch_literal(len);
