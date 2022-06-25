@@ -15,6 +15,10 @@
 #include "cpu6.h"
 #include "mux.h"
 
+#ifndef O_BINARY
+#define O_BINARY 0
+#endif
+
 static unsigned finch;		/* Finch or original FDC */
 
 volatile unsigned int emulator_done;
