@@ -14,6 +14,7 @@
  *	(see monitor 84C3)
  */
 
+#include <assert.h>
 #include <stdio.h>
 #include <stdint.h>
 #include <stdlib.h>
@@ -49,8 +50,12 @@ static uint8_t dma_mystery;	/* We don't know what this reg on the AM2901 is
 static uint8_t cpu_sram[256];
 static uint8_t mmu[8][32];
 
+// Standing in for some internal microcode state
+static unsigned twobit_cached_reg = 0;
+
 static void mmu_mem_write8(uint16_t addr, uint8_t val);
 static uint32_t mmu_map(uint16_t addr);
+static void logic_flags16(unsigned r);
 
 /*
  *	DMA engine guesswork
@@ -271,6 +276,58 @@ uint8_t popbyte(void)
 	return d;
 }
 
+
+static uint16_t get_twobit(unsigned mode, unsigned idx, unsigned len) {
+	uint16_t addr = 0;
+	unsigned regs;
+	unsigned thismode = mode;
+
+	if (idx == 0)
+		thismode = mode >> 2;
+
+	switch (thismode & 0x3)	{
+	case 0:
+		// EA <- PC
+		addr = fetch16();
+		//fprintf(stderr, "%x EA <- (PC) = %04x\n", idx, addr);
+		break;
+	case 1:
+		// EA <- imm8/imm16 + r1 + r2
+		//fprintf(stderr, "%x EA <- ", idx);
+		regs = fetch();
+		addr =  (regs & 0x10) ? fetch16() : fetch(); // if r1 is odd, do imm16
+		//fprintf(stderr, "%04x", addr);
+		addr += regpair_read((regs >> 4) & 0xe);
+		//fprintf(stderr, " + (%x) %04x", (regs >> 4) & 0xe, regpair_read((regs >> 4) & 0xe));
+		if ((regs & 0xe) != 0) { // ignore r2 if it's A
+			addr += regpair_read(regs & 0xe);
+			//fprintf(stderr, " + (%x) %04x",  regs & 0xe, regpair_read(regs & 0xe));
+		}
+		//fprintf(stderr, " = %04x", addr);
+		break;
+	case 2:
+		// EA <- R
+		// This mode is complicated because it tries to merge two mode 2s into a single byte
+		if (idx == 1 && mode == 0xa) {
+			// previous twobit already fetched our regbyte
+			regs = twobit_cached_reg;
+		} else {
+			twobit_cached_reg = regs = fetch();
+		}
+		if (idx == 0)
+			regs >>= 4;
+		addr = regpair_read(regs & 0xe);
+		//fprintf(stderr, "%x EA <- reg(%x) = %04x\n", idx, regs & 0xe, addr);
+		break;
+	case 3:
+		// EA <- (literal)
+		addr = fetch_literal(len+1);
+		//fprintf(stderr, "%x EA <- (imm)*0x%02x = %04x\n", idx, len+1, addr);
+		break;
+	}
+	return addr;
+}
+
 /*
  *	The MMU
  *
@@ -292,47 +349,69 @@ static uint32_t mmu_map(uint16_t addr)
 }
 
 /*
- *	MMU load operations
+ *	MMU read/write operations
  *
- *	2E 0C 0xF8|pri addr
- *	2E 1C 0xF8|pri addr
+ *  2E sssrmmnn
  *
- *	Copies the 32bytes of MMU settings for that ipl into the memory
- *	location specified. We've only seen 0C and 1C so it's possible that
- *	the C F or 8 all mean something and there are other ways to specify
- *	the address.
+ *  s - sub-op
+ *  r - read; 0 = write to mmu, 1 = read from mmu
+ *	m - opn1 twobit address mode
+ *	n - mem twobit address mode
  */
-static int mmu_loadop(uint8_t subop)
+static int mmu_transfer_op()
 {
-	uint8_t bank = fetch() - 0xF8;
-	uint16_t addr = fetch16();
-	uint8_t *mb;
-	unsigned n;
+	unsigned subop = fetch();
+	// While opn1 is commonly an immediate, it can actually use any
+	// addressing mode
+	uint8_t opn1 = mmu_mem_read8(get_twobit(subop, 0, 0));
+	// opn1 is in the format xxxxxbbb
+	uint8_t base = opn1 & 0x7; 	// b - page table base
+	uint8_t x = opn1 >> 3; 	// x - meaning depends on subop
 
-	if (bank < 0 || bank > 7) {
-		fprintf(stderr, "MMU bad bank %02X at %04X\n", bank,
-			exec_pc);
-		exit(1);
+
+	uint8_t offset = 0;
+	unsigned len, val;
+
+	switch (subop & 0xe0) {
+		case 0x00: // WPF/RPF - transfer x entries at offset 0
+			len = x;
+		break;
+		case 0x20: // WPF1/RPF1 - transfer 1 entry at offset x
+			len = 0;
+			offset = x;
+		break;
+		case 0x40: // WPF32/RPF32 - transfer (32-x) entries at offset x
+			offset = x;
+			len = 31 - x;
+		break;
+		default:
+			// microcode suggests these are illegal (will trap)
+			fprintf(stderr, "%04X: Illegal 2E op %02X\n", cpu6_pc(), op);
+			return 0;
 	}
 
-	mb = mmu[bank];
-	n = 32;
+	// There is no way to bypass the MMU, so entries are always
+	// transferred to/from virtual addresses
+	uint16_t addr = get_twobit(subop, 1, len);
 
-	switch(subop) {
-	case 0x0C:
-		/* Question: are these addresses virtual, are they switched as
-		   one or is the MMU translation live on them ? */
-		while(n--)
-			*mb++ = mmu_mem_read8(addr++);
+	switch(subop & 0x10) {
+	case 0x00:
+		do {
+			assert(base < 8 && offset < 0x20);
+			mmu[base][offset++] = mmu_mem_read8(addr++);
+		} while(len--);
 		break;
-	case 0x1C:
-		while(n--)
-			mmu_mem_write8(addr++, *mb++);
+	case 0x10:
+		do {
+			assert(base < 8 && offset < 0x20);
+			val = mmu[base][offset++];
+			mmu_mem_write8(addr++, val);
+
+			// We know this has some flag effects because 8130 relies upon it setting
+			// presumably Z to exit
+			logic_flags16(val);
+		} while(len--);
 		break;
-	default:
-		fprintf(stderr, "MMU bad subop %02X at %04X\n", bank,
-			exec_pc);
-		exit(1);
 	}
 	return 0;
 }
@@ -350,51 +429,6 @@ static uint8_t block_op_getLen(int inst, int op) {
 		// But code that needs a 16bit memcpy seems to use F7 instead
 		return reg_read(AL);
 	}
-}
-
-static unsigned twobit_cached_reg = 0;
-
-static uint16_t get_twobit(unsigned mode, unsigned idx, unsigned len) {
-	uint16_t addr = 0;
-	unsigned regs;
-	unsigned thismode = mode;
-
-	if (idx == 0)
-		thismode = mode >> 2;
-
-	switch (thismode & 0x3)	{
-	case 0:
-		// EA <- PC
-		addr = fetch16();
-		break;
-	case 1:
-		// EA <- imm8/imm16 + r1 + r2
-		regs = fetch();
-		addr =  (regs & 0x10) ? fetch16() : fetch(); // if r1 is odd, do imm16
-		addr += regpair_read((regs >> 4) & 0xe);
-		if ((regs & 0xe) != 0) { // ignore r2 if it's A
-			addr += regpair_read(regs & 0xe);
-		}
-		break;
-	case 2:
-		// EA <- R
-		// This mode is complicated because it tries to merge two mode 2s into a single byte
-		if (idx == 1 && mode == 0xa) {
-			// previous twobit already fetched our regbyte
-			regs = twobit_cached_reg;
-		} else {
-			twobit_cached_reg = regs = fetch();
-		}
-		if (idx == 0)
-			regs >>= 4;
-		addr = regpair_read(regs & 0xe);
-		break;
-	case 3:
-		// EA <- (literal)
-		addr = fetch_literal(len+1);
-		break;
-	}
-	return addr;
 }
 
 /*
@@ -1338,25 +1372,6 @@ static int dma_op(void)
 }
 
 /*
- *	We know this has some flag effects because 8130 relies upon it setting
- *	presumably Z to exit
- *
- *	Weirdnesses
- *	2E 1C and 2E 0C appear to be special
- */
-static int move_op(void)
-{
-	op = fetch();
-	/* Seem to be some strange gaps here */
-	if (op == 0x0C || op == 0x1C)
-		return mmu_loadop(op);
-	/* Guesswork at this point */
-	fprintf(stderr, "Unknown 0x2E op %02X at %04X\n", op, exec_pc);
-	mov16(op >> 4, op & 0x0F);
-	return 0;
-}
-
-/*
  *	Jump doesn't quite match the op decodes for the load/store strangely
  *
  *	0 would be nonsense
@@ -1630,7 +1645,7 @@ static int misc2x_op(void)
 		/* On CPU 4 these would be inc XL/dec XL but they are not present and
 		   X is almost always handled as a 16bit register only */
 	case 0x2E:
-		return move_op();
+		return mmu_transfer_op();
 	case 0x2F:
 		return dma_op();
 	default:
