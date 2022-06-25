@@ -359,7 +359,7 @@ static uint16_t get_twobit(unsigned mode, unsigned idx, unsigned len) {
 	unsigned regs;
 	unsigned thismode = mode;
 
-	if (idx == 1)
+	if (idx == 0)
 		thismode = mode >> 2;
 
 	switch (thismode & 0x3)	{
@@ -390,7 +390,8 @@ static uint16_t get_twobit(unsigned mode, unsigned idx, unsigned len) {
 		addr = regpair_read(regs & 0xe);
 		break;
 	case 3:
-		addr = fetch_literal(len);
+		// EA <- (literal)
+		addr = fetch_literal(len+1);
 		break;
 	}
 	return addr;
@@ -416,10 +417,10 @@ static int block_op(int inst)
 
 	// memset only reads the source once
 	if ((op & 0xF0) == 0x90)
-		src_len = 1;
+		src_len = 0;
 
 	sa = get_twobit(am, 0, src_len);
-	da = get_twobit(am, 1, src_len);
+	da = get_twobit(am, 1, dst_len);
 
 	switch(op & 0xF0) {
 	case 0x40:
@@ -1716,7 +1717,7 @@ static int alu4x_op(void)
 			exec_pc);
 		return 0;
 	case 0x47:		/* unused */
-		return block_op(47);
+		return block_op(0x47);
 	case 0x48:
 		return add(BL, AL);
 	case 0x49:
