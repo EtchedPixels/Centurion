@@ -144,7 +144,9 @@ void mux_write(uint16_t addr, uint8_t val)
 		write(mux[unit].out_fd, &val, 1);
 	} else {
 		val &= 0x7F;
-		if (val != 0x08 && val != 0x0A && val != 0x0D
+		if (val == 0x06) /* Cursor one position right */
+			printf("\x1b[1C");
+		else if (val != 0x08 && val != 0x0A && val != 0x0D
 		    && (val < 0x20 || val == 0x7F))
 			printf("[%02X]", val);
 		else
