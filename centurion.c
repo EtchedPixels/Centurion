@@ -795,11 +795,11 @@ void mem_write8(uint32_t addr, uint8_t val)
 	}
 
 	if (diag && addr >= 0x08000 && addr < 0x0B800) {
-		fprintf(stderr, "Write to ROM at %04X\n", cpu6_pc());
+		fprintf(stderr, "%04X: Write to ROM [%05X]\n", cpu6_pc(), addr);
 		return;
 	}
 	if (addr >= 0x3FC00) {
-		fprintf(stderr, "Write to ROM at %04X\n", cpu6_pc());
+		fprintf(stderr, "%04X: Write to ROM [%05X]\n", cpu6_pc(), addr);
 		return;
 	}
 	addr = remap(addr);
