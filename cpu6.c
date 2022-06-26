@@ -319,7 +319,7 @@ static uint16_t get_twobit(unsigned mode, unsigned idx, unsigned len) {
 		break;
 	case 3:
 		// EA <- (literal)
-		addr = fetch_literal(len+1);
+		addr = fetch_literal(len);
 		//fprintf(stderr, "%x EA <- (imm)*0x%02x = %04x\n", idx, len+1, addr);
 		break;
 	}
@@ -361,7 +361,7 @@ static int mmu_transfer_op()
 	unsigned subop = fetch();
 	// While opn1 is commonly an immediate, it can actually use any
 	// addressing mode
-	uint8_t opn1 = mmu_mem_read8(get_twobit(subop, 0, 0));
+	uint8_t opn1 = mmu_mem_read8(get_twobit(subop, 0, 1));
 	// opn1 is in the format xxxxxbbb
 	uint8_t base = opn1 & 0x7; 	// b - page table base
 	uint8_t x = opn1 >> 3; 	// x - meaning depends on subop
@@ -372,15 +372,15 @@ static int mmu_transfer_op()
 
 	switch (subop & 0xe0) {
 		case 0x00: // WPF/RPF - transfer x entries at offset 0
-			len = x;
+			len = x + 1;
 		break;
 		case 0x20: // WPF1/RPF1 - transfer 1 entry at offset x
-			len = 0;
+			len = 1;
 			offset = x;
 		break;
 		case 0x40: // WPF32/RPF32 - transfer (32-x) entries at offset x
 			offset = x;
-			len = 31 - x;
+			len = 32 - x;
 		break;
 		default:
 			// microcode suggests these are illegal (will trap)
@@ -390,17 +390,18 @@ static int mmu_transfer_op()
 
 	// There is no way to bypass the MMU, so entries are always
 	// transferred to/from virtual addresses
+	// The microcode might have a requirement for this to not be implicit
 	uint16_t addr = get_twobit(subop, 1, len);
 
 	switch(subop & 0x10) {
 	case 0x00:
-		do {
+		while(len--) {
 			assert(base < 8 && offset < 0x20);
 			mmu[base][offset++] = mmu_mem_read8(addr++);
-		} while(len--);
+		}
 		break;
 	case 0x10:
-		do {
+		while(len--) {
 			assert(base < 8 && offset < 0x20);
 			val = mmu[base][offset++];
 			mmu_mem_write8(addr++, val);
@@ -408,7 +409,7 @@ static int mmu_transfer_op()
 			// We know this has some flag effects because 8130 relies upon it setting
 			// presumably Z to exit
 			logic_flags16(val);
-		} while(len--);
+		}
 		break;
 	}
 	return 0;
@@ -446,39 +447,39 @@ static int block_op(int inst)
 {
 	unsigned op = fetch();
 	unsigned am = op & 0x0F;
-	unsigned dst_len = block_op_getLen(inst, op);
+	unsigned dst_len = block_op_getLen(inst, op) + 1;
 	unsigned src_len = dst_len;
 	uint16_t sa, da;
 	uint8_t fill;
 
 	// memset only reads the source once
 	if ((op & 0xF0) == 0x90)
-		src_len = 0;
+		src_len = 1;
 
 	sa = get_twobit(am, 0, src_len);
 	da = get_twobit(am, 1, dst_len);
 
 	switch(op & 0xF0) {
 	case 0x40:
-		do {
+		while(dst_len--) {
 			mmu_mem_write8(da++, mmu_mem_read8(sa++));
-		} while(dst_len--);
+		};
 		return 0;
 	case 0x80:
 		alu_out |= ALU_V;
-		do {
+		while (dst_len--) {
 			if(mmu_mem_read8(da++) !=
 				mmu_mem_read8(sa++)) {
 				alu_out &= ~ALU_V;
 				break;
 			}
-		} while(dst_len--);
+		}
 		return 0;
 	case 0x90:
 		fill = mmu_mem_read8(sa);
-		do {
+		while (dst_len--) {
 			mmu_mem_write8(da++, fill);
-		} while (dst_len--);
+		}
 		return 0;
 	default:
 		fprintf(stderr, "%04X: Unknown block xfer %02X\n", cpu6_pc(), op);
