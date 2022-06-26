@@ -9,6 +9,7 @@ struct MuxUnit
         int out_fd;
         unsigned char status;
         unsigned char lastc;
+        uint64_t tx_finish_time;
 };
 
 /* Status register bits */

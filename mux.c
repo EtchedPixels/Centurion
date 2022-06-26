@@ -9,19 +9,23 @@
 #include "mux.h"
 
 static struct MuxUnit mux[NUM_MUX_UNITS];
-static char ipl_request = -1; // Let's suppose -1 = disabled
+ // 0 disables interrupts
+ // LOAD writes 0 to F20A before transferring execution to a new binary
+static char rx_ipl_request = 0;
+static char tx_ipl_request = 0;
+static int cause_unit = 0;
 
 // Set the initial state for all out ports
 void mux_init(void)
 {
-        int i;
+	int i;
 
-        for (i = 0; i < NUM_MUX_UNITS; i++) {
-                mux[i].in_fd = -1;
-                mux[i].out_fd = -1;
+	for (i = 0; i < NUM_MUX_UNITS; i++) {
+		mux[i].in_fd = -1;
+		mux[i].out_fd = -1;
 		mux[i].status = 0;
-                mux[i].lastc = 0xFF;
-        }
+		mux[i].lastc = 0xFF;
+	}
 }
 
 void mux_attach(unsigned unit, int in_fd, int out_fd)
@@ -44,9 +48,9 @@ static unsigned int next_char(uint8_t unit)
 	int r;
 	unsigned char c;
 
-        if (mux[unit].in_fd == -1) {
-                return mux[unit].lastc;
-        }
+	if (mux[unit].in_fd == -1) {
+		return mux[unit].lastc;
+	}
 
 	r = read(mux[unit].in_fd, &c, 1);
 
@@ -92,10 +96,11 @@ static unsigned int next_char(uint8_t unit)
  *	4,5		MUX port 2
  *	6,7		MUX port 3
  *
- *	0A		Interrupt level ?
- *	0E		Cleared on IRQ test
+ *	0A		Recv Interrupt level ?
+ *  0B		Set to 0xe0 by OPSYS CRT driver initialization
+ *	0E		Send Interrupt level?
+ *			OPSYS sets this to the same value as 0A
  *	0F		read to check for interrupt - NZ = none
- *
  *
  */
 
@@ -108,9 +113,15 @@ void mux_write(uint16_t addr, uint8_t val)
 
 	if (addr == 0x0A) {
 		// Register 0x0A - set interrupt request level
-		ipl_request = val;
+		fprintf(stderr, "\nMux, RX Configured to LVL %x\n", val);
+		rx_ipl_request = val;
+		return;
+	} else if (addr == 0xE) {
+		fprintf(stderr, "\nMux, TX Configured to LVL %x\n", val);
+		tx_ipl_request = val;
 		return;
 	} else if (addr >= NUM_MUX_UNITS * 2) {
+		fprintf(stderr, "\nWrite to unknown MUX register %x=%02x\n", addr, val);
 		// Any other out-of-band address, we don't know what to do with it
 		return;
 	}
@@ -119,20 +130,26 @@ void mux_write(uint16_t addr, uint8_t val)
 	data = addr & 1;
 
 	if (!data) {
-                /* This is mode byte, we currently don't have anything
-                 * to do with it.
-                 * But if we wanted to operate on a real serial port, we'd need
-                 * to change baud rate here.
+		/* This is mode byte, we currently don't have anything
+		 * to do with it.
+		 * But if we wanted to operate on a real serial port, we'd need
+		 * to change baud rate here.
 		 * The code we have (diag test #6 and WIPL) loves to reset it every time.
 		 * I have also never seen clearing register 0x0A; so i assume it also
 		 * disables interrupt generation until requested explicitly.
 		 */
-		if (ipl_request != -1) {
-			cpu_deassert_irq(ipl_request);
-			ipl_request = -1;
+		if (rx_ipl_request != 0) {
+			cpu_deassert_irq(rx_ipl_request);
+			rx_ipl_request = 0;
 		}
 		return;
 	}
+
+	uint64_t symbol_len = 1000000000.0 / 9600.0; // Hardcoded to 9600 baud
+
+	mux[unit].status &= ~MUX_TX_READY;
+	mux[unit].tx_finish_time = get_current_time() + symbol_len * 10;
+	fprintf(stderr, "time: %li, finish: %li\n", get_current_time() / 1000, mux[unit].tx_finish_time / 1000);
 
 	if (mux[unit].out_fd == -1) {
 		/* This MUX unit isn't connected to anything */
@@ -163,16 +180,17 @@ uint8_t mux_read(uint16_t addr)
 
 	if (addr == 0x0F) {
 		/* Reading from 0x0F supposedly ACKs the interrupt */
-		if (ipl_request != -1) {
-			cpu_deassert_irq(ipl_request);
+		if (rx_ipl_request != 0) {
+			cpu_deassert_irq(rx_ipl_request);
 		}
-		/* The F1 test also checks the value and ignores the interrupt
-		 * (does not read the character) if nonzero value arrives. Perhaps
-		 * this has to do with daisy-chaining, but we don't know; WIPL
-		 * does not test the value
-		 */
-		return 0;
+		if (tx_ipl_request != 0) {
+			cpu_deassert_irq(tx_ipl_request);
+		}
+		// Returns the mux unit ID that caused the interrupt
+		// If we had multiple MUX4 boards, the board ID would be in the upper nibble
+		return cause_unit << 1;
 	} else if (addr >= NUM_MUX_UNITS * 2) {
+		fprintf(stderr, "Read from unknown MUX register %x\n", addr);
 		// Any other out-of-band address, we don't know what to do with it
 		return 0;
 	}
@@ -192,8 +210,33 @@ uint8_t mux_read(uint16_t addr)
 static void set_read_ready(unsigned unit)
 {
 	mux[unit].status |= MUX_RX_READY;
-	if (ipl_request != -1)
-		cpu_assert_irq(ipl_request);
+	if (rx_ipl_request)
+		cpu_assert_irq(rx_ipl_request);
+	// I've implemented this as just overwriting the last cause, which will cause issues
+	// Would be interesting to see if the hardware has some kind of queue
+	//
+	// Ken mentions that sometimes key presses would be dropped under heavy loads
+	cause_unit = unit;
+}
+
+static void set_write_ready(unsigned unit)
+{
+	mux[unit].status |= MUX_TX_READY;
+	mux[unit].tx_finish_time = 0;
+	if (tx_ipl_request)
+		cpu_assert_irq(tx_ipl_request);
+	cause_unit = unit;
+}
+
+static void check_tx_done() {
+	uint64_t time = get_current_time();
+	for (unsigned unit = 0; unit < NUM_MUX_UNITS; unit++) {
+		uint64_t finish = mux[unit].tx_finish_time;
+		if (finish && finish <= time) {
+			fprintf(stderr, "Finished at %li\n", time / 1000);
+			set_write_ready(unit);
+		}
+	}
 }
 
 #ifdef WIN32
@@ -201,6 +244,8 @@ static void set_read_ready(unsigned unit)
 void mux_poll(void)
 {
 	int unit;
+
+	check_tx_done();
 
 	for (unit = 0; unit < NUM_MUX_UNITS; unit++) {
 		if (mux[unit].status & MUX_RX_READY) {
@@ -224,6 +269,8 @@ void mux_poll(void)
 	fd_set i;
 	int max_fd = 0;
 	int unit;
+
+	check_tx_done();
 
 	FD_ZERO(&i);
 

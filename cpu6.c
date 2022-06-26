@@ -1311,6 +1311,7 @@ static int low_op(void)
 		 *              -- Ken Romain
 		 */
 	case 0x0E:		/* DELAY */
+		advance_time(4.5 * 1000000.0);
 		break;
 	case 0x0F:
 	    /* RSYS - Does the inverse of JSYS

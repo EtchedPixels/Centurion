@@ -22,6 +22,7 @@
 static unsigned finch;		/* Finch or original FDC */
 
 volatile unsigned int emulator_done;
+static uint64_t cpu_timestamp_ns = 0;
 
 #define TRACE_MEM_RD	1
 #define TRACE_MEM_WR	2
@@ -770,6 +771,11 @@ static uint8_t do_mem_read8(uint32_t addr, int dis)
 
 uint8_t mem_read8(uint32_t addr)
 {
+	// Extremely simple timing model where we assume each CPU memory
+	// access takes exactly 3 cycles (600ns), and the microcode is
+	// never doing things between memory accesses.
+	cpu_timestamp_ns += 600;
+
 	uint8_t r = do_mem_read8(addr, 0);
 	if (trace & TRACE_MEM_RD)
 		if (addr > 0xFF || (trace & TRACE_MEM_REG))
@@ -805,6 +811,14 @@ void mem_write8(uint32_t addr, uint8_t val)
 	addr = remap(addr);
 	memclean[addr] = 1;
 	mem[addr] = val;
+}
+
+uint64_t get_current_time() {
+	return cpu_timestamp_ns;
+}
+
+void advance_time(uint64_t nanoseconds) {
+	cpu_timestamp_ns += nanoseconds;
 }
 
 void halt_system(void)
