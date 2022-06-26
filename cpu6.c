@@ -918,48 +918,43 @@ static int mov(unsigned dst, unsigned src)
 
 /* 16bit versions */
 
-static int inc16(unsigned reg, unsigned val)
+static uint16_t inc16(uint16_t a, uint16_t imm)
 {
-	uint16_t r = regpair_read(reg);
-	regpair_write(reg, r + val);
-	arith_flags(r + val, r, val);
-	return 0;
+	arith_flags(a + imm, a, imm);
+	return a + imm;
 }
 
-static int dec16(unsigned reg, unsigned val)
+static uint16_t dec16(uint16_t a, uint16_t imm)
 {
-	uint16_t r = regpair_read(reg) - val;
-	regpair_write(reg, r);
+	uint16_t r = a - imm;
 	alu_out &= ~(ALU_L | ALU_V | ALU_M | ALU_F);
 	if ((r & 0xFFFF) == 0)
 		alu_out |= ALU_V;
 	if (r & 0x8000)
 		alu_out |= ALU_M;
-	return 0;
+	return r;
 }
 
 /* Assume behaviour matches CLR */
-static int clr16(unsigned reg, unsigned v)
+static uint16_t clr16(uint16_t a, uint16_t imm)
 {
-	regpair_write(reg, v);
 	alu_out &= ~(ALU_F | ALU_L | ALU_M);
-/*	if (v == 0) */
+/*	if (imm == 0) */
 		alu_out |= ALU_V;
-	return 0;
+	return imm;
 }
 
-static int not16(unsigned reg, unsigned val)
+static uint16_t not16(uint16_t a, uint16_t imm)
 {
-	uint16_t r = (~regpair_read(reg)) + val;
-	regpair_write(reg, r);
+	uint16_t r = (~a) + imm;
 	logic_flags16(r);
-	return 0;
+	return r;
 }
 
-static int sra16(unsigned reg, unsigned count)
+static uint16_t sra16(uint16_t a, uint16_t count)
 {
 	uint16_t v;
-	uint16_t r = regpair_read(reg);
+	uint16_t r = a;
 
 	while (count--) {
 		v = r >> 1;
@@ -968,14 +963,13 @@ static int sra16(unsigned reg, unsigned count)
 		shift_flags16(r & 1, v);
 		r = v;
 	}
-	regpair_write(reg, r);
-	return 0;
+	return r;
 }
 
-static int sll16(unsigned reg, unsigned count)
+static uint16_t sll16(uint16_t a, uint16_t count)
 {
 	uint16_t v;
-	uint16_t r = regpair_read(reg);
+	uint16_t r = a;
 
 	while (count--) {
 		v = r << 1;
@@ -990,13 +984,12 @@ static int sll16(unsigned reg, unsigned count)
 		}
 		r = v;
 	}
-	regpair_write(reg, r);
-	return 0;
+	return r;
 }
 
-static int rrc16(unsigned reg, unsigned count)
+static uint16_t rrc16(uint16_t a, uint16_t count)
 {
-	uint16_t r = regpair_read(reg);
+	uint16_t r = a;
 	uint16_t c;
 
 	while (count--) {
@@ -1007,13 +1000,12 @@ static int rrc16(unsigned reg, unsigned count)
 
 		shift_flags16(c, r);
 	}
-	regpair_write(reg, r);
-	return 0;
+	return r;
 }
 
-static int rlc16(unsigned reg, unsigned count)
+static uint16_t rlc16(uint16_t a, uint16_t count)
 {
-	uint16_t r = regpair_read(reg);
+	uint16_t r = a;
 	uint16_t c;
 
 	while (count--) {
@@ -1032,8 +1024,7 @@ static int rlc16(unsigned reg, unsigned count)
 			break;
 		}
 	}
-	regpair_write(reg, r);
-	return 0;
+	return r;
 }
 
 static int add16(unsigned dsta, unsigned s)
@@ -1678,54 +1669,81 @@ static int misc2x_op(void)
 	}
 }
 
-/* Like misc2x but word */
-static int misc3x_op(void)
+static uint16_t misc3x_op_impl(unsigned op, uint16_t val, unsigned imm)
 {
-	unsigned low = 0;
-	unsigned reg = A;
-	if (!(op & 8)) {
-		reg = fetch();
-		low = reg & 0x0F;
-		reg >>= 4;
-	}
-
 	switch (op) {
 	case 0x30:
-		return inc16(reg, low + 1);
+		return inc16(val, imm + 1);
 	case 0x31:
-		return dec16(reg, low + 1);
+		return dec16(val, imm + 1);
 	case 0x32:
-		return clr16(reg, low);
+		return clr16(val, imm);
 	case 0x33:
-		return not16(reg, low);
+		return not16(val, imm);
 	case 0x34:
-		return sra16(reg, low + 1);
+		return sra16(val, imm + 1);
 	case 0x35:
-		return sll16(reg, low + 1);
+		return sll16(val, imm + 1);
 	case 0x36:
-		return rrc16(reg, low + 1);
+		return rrc16(val, imm + 1);
 	case 0x37:
-		return rlc16(reg, low + 1);
+		return rlc16(val, imm + 1);
 	case 0x38:
-		return inc16(A, 1);
+		return inc16(val, 1);
 	case 0x39:
-		return dec16(A, 1);
+		return dec16(val, 1);
 	case 0x3A:
-		return clr16(A, 0);
+		return clr16(val, 0);
 	case 0x3B:
-		return not16(A, 0);
+		return not16(val, 0);
 	case 0x3C:
-		return sra16(A, 1);
+		return sra16(val, 1);
 	case 0x3D:
-		return sll16(A, 1);
-	case 0x3E:
-		return inc16(X, 1);
-	case 0x3F:
-		return dec16(X, 1);
+		return sll16(val, 1);
 	default:
-		fprintf(stderr, "internal error misc3\n");
+		fprintf(stderr, "internal error misc3 %x\n", op);
 		exit(1);
 	}
+}
+
+/* Like misc2x but word
+ * If the explicit register is odd, it operates on memory
+*/
+static int misc3x_op(void)
+{
+	// Special cases that don't fit general pattern
+	if (op == 0x3E) {
+		regpair_write(X, inc16(regpair_read(X), 1));
+		return 0;
+	}
+	if (op == 0x3F) {
+		regpair_write(X, dec16(regpair_read(X), 1));
+		return 0;
+	}
+
+	if (op & 8) {
+		// Implicit ops that work on A
+		regpair_write(A, misc3x_op_impl(op, regpair_read(A), 0));
+		return 0;
+	}
+
+	unsigned opn = fetch();
+	unsigned imm = opn & 0xf;
+	unsigned reg = (opn >> 4) & 0xe;
+	if ((opn & 0x10) == 0) {
+		// If register is even, operate on register
+		regpair_write(reg, misc3x_op_impl(op, regpair_read(reg), imm));
+		return 0;
+	}
+
+	// Otherwise, we do a memory read-modify-write operation
+	uint16_t addr = fetch16();
+	if (reg != A) {	// indexed
+		addr += regpair_read(reg);
+	}
+	uint16_t result = misc3x_op_impl(op, mmu_mem_read16(addr), imm);
+	mmu_mem_write16(addr, result);
+	return 0;
 }
 
 /* Mostly ALU operations on AL */
