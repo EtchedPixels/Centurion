@@ -99,15 +99,13 @@ uint8_t dma_write_cycle(void)
 }
 
 /*
- *	We don't know how the flags are packed into C with the IPL
- *	but they appear to live in the low 4 bits and the lv in the
- *	low 4 bits of the upper byte
+ *	When packed into C, the flags live in the upper 4 bits of the low byte
  */
 
-#define ALU_L	1
-#define ALU_M	2
-#define ALU_F	4
-#define ALU_V	8
+#define ALU_L	0x10
+#define ALU_F	0x20
+#define ALU_M	0x40
+#define ALU_V	0x80
 
 
 /*
@@ -1315,8 +1313,10 @@ static int low_op(void)
 	case 0x0E:		/* DELAY */
 		break;
 	case 0x0F:
-		/* Save PC to P, skip a byte off stack, load PC from X, load X
-		   from stack, load IPL from stack, load mmu tag from stack */
+	    /* RSYS - Does the inverse of JSYS
+		 * Save PC to P, skip a byte off stack, load PC from X, load X
+		 * from stack, load IPL from stack, load mmu tag from stack
+		 */
 		{
 			uint16_t new_x, new_pc, new_s;
 			regpair_write(P, pc);
@@ -1326,14 +1326,38 @@ static int low_op(void)
 			/* X is set off the stack and S is propogated */
 			new_pc = regpair_read(X);
 			new_s = regpair_read(S);
-			/* We flip MMU context after all the POP cases */
-			cpu_mmu = popbyte() & 0x07;
+			{
+				uint8_t byte = popbyte();
+				alu_out = byte & (ALU_L | ALU_F | ALU_M | ALU_V);
+				/* We flip MMU context after all the POP cases */
+				cpu_mmu = byte & 0x07;
+			}
 			regpair_write(X, new_x);
 			regpair_write(S, new_s);
 			pc = new_pc;
 			return 0;
 		}
 	}
+	return 0;
+}
+
+/* JSYS - System call
+ *
+ *	66 {arg}
+ *
+ * Pushes current state, switches to mmu bank zero and jumps to 0x100
+ */
+static int jsys_op(void)
+{
+	uint8_t arg = fetch();
+	pushbyte(alu_out | cpu_mmu);  // Push CCR and Page Table Base
+	pushbyte(cpu_ipl & 0xf);      // Push current level
+	push(regpair_read(X));        // Push X
+	regpair_write(X, pc);         // X <- PC
+
+	pushbyte(arg);                // Push arg
+	cpu_mmu = 0;                  // Switch to mmu bank 0
+	pc = 0x100;                   // jump to 0x100
 	return 0;
 }
 
@@ -1882,13 +1906,26 @@ static int alu5x_op(void)
 	case 0x5E:
 		return mov16(regpair_addr(Z), srcv);
 	case 0x5F:
-		fprintf(stderr, "srcv %x regpair_addr(%x)\n", srcv,
-			regpair_addr(S));
 		return mov16(regpair_addr(S), srcv);
 	default:
 		fprintf(stderr, "internal error alu5\n");
 		exit(1);
 	}
+}
+
+/* It's not entirely clear what these instructions are for
+ * they set Level 1's AH to 0 and -1
+ *
+ * Instruction 1F branches based on that reg, but doesn't show up in disassembly of LOAD
+ * Disassembly of LOAD hints that it might disable the timer decrementer
+ */
+static int semaphore_op() {
+	if (op == 0xb6)
+		cpu_sram[0x10] = 0xff;
+	if (op == 0xc6)
+		cpu_sram[0x10] = 0x00;
+
+	return 0;
 }
 
 /*
@@ -1959,10 +1996,10 @@ unsigned cpu6_execute_one(unsigned trace)
 	op = fetch();
 	if (trace) {
 		fprintf(stderr,
-			"%02X %s A:%04X  B:%04X X:%04X Y:%04X Z:%04X S:%04X C:%04X | ",
+			"%02X %s A:%04X  B:%04X X:%04X Y:%04X Z:%04X S:%04X C:%04X LVL:%x MAP:%x | ",
 			op, flagcode(), regpair_read(A), regpair_read(B),
 			regpair_read(X), regpair_read(Y), regpair_read(Z),
-			regpair_read(S), regpair_read(C));
+			regpair_read(S), regpair_read(C), cpu_ipl, cpu_mmu);
 		disassemble(op);
 	}
 	if (op < 0x10)
@@ -1977,6 +2014,8 @@ unsigned cpu6_execute_one(unsigned trace)
 		return misc3x_op();
 	if (op < 0x50)
 		return alu4x_op();
+	if (op == 0x66)
+		return jsys_op();
 	if (op < 0x60)
 		return alu5x_op();
 	if (op == 0x67)
@@ -1985,6 +2024,8 @@ unsigned cpu6_execute_one(unsigned trace)
 		return x_op();
 	if (op < 0x80)
 		return jump_op();
+	if (op == 0xb6 || op == 0xc6)
+		return semaphore_op();
 	if (op == 0xd7 || op == 0xe6)
 		return cpu6_il_mov();
 	if (op == 0xf6)
