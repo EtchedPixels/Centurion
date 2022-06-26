@@ -830,7 +830,7 @@ static void load_rom(const char *name, uint32_t addr, uint16_t len)
 void usage(void)
 {
 	fprintf(stderr,
-		"centurion [-l port] [-d] [-s switches] [-S diagswitches] [-t trace]\n");
+		"centurion [-l port] [-d] [-s switches] [-S diagswitches] [-t trace] [-T terminateAfter]\n");
 	exit(1);
 }
 
@@ -838,10 +838,12 @@ int main(int argc, char *argv[])
 {
 	int opt;
 	unsigned port = 0;
+	int64_t terminate_at = 0;
+	int64_t instruction_count = 0;
 
 	mux_init();
 
-	while ((opt = getopt(argc, argv, "dFl:s:S:t:")) != -1) {
+	while ((opt = getopt(argc, argv, "dFl:s:S:t:T:")) != -1) {
 		switch (opt) {
 		case 'd':
 			diag = 1;
@@ -862,6 +864,9 @@ int main(int argc, char *argv[])
 			break;
 		case 't':
 			trace = atoi(optarg);
+			break;
+		case 'T':
+			terminate_at = atol(optarg);
 			break;
 		default:
 			usage();
@@ -925,6 +930,14 @@ int main(int argc, char *argv[])
 		}
 		/* Update peripherals state */
 		mux_poll();
+
+		instruction_count++;
+		if (terminate_at && instruction_count >= terminate_at) {
+			printf("\nTerminated after %li instructions\n", instruction_count);
+			if (trace)
+				fprintf(stderr, "Terminated after %li instructions\n", instruction_count);
+			break;
+		}
 	}
 	return 0;
 }
