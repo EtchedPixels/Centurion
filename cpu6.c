@@ -1101,48 +1101,46 @@ static uint16_t rlc16(uint16_t a, uint16_t count)
 	return r;
 }
 
-static int add16(unsigned dsta, unsigned s)
+static int add16(unsigned dsta, unsigned a, unsigned b)
 {
-	unsigned d = mmu_mem_read16(dsta);
-	mmu_mem_write16(dsta, d + s);
-	arith_flags16(d + s, d, s);
+	mmu_mem_write16(dsta, a + b);
+	arith_flags16(a + b, a, b);
 	alu_out &= ~ALU_L;
-	if ((s + d) & 0x10000)
+	if ((b + a) & 0x10000)
 		alu_out |= ALU_L;
 	return 0;
 }
 
-static int sub16(unsigned dsta, unsigned s)
+static int sub16(unsigned dsta, unsigned a, unsigned b)
 {
-	unsigned d = mmu_mem_read16(dsta);
-	unsigned r = s - d;
+	unsigned r = b - a;
 	mmu_mem_write16(dsta, r);
-	sub_flags16(r, s, d);
+	sub_flags16(r, b, a);
 	alu_out &= ~ALU_L;
-	if (d <= s)
+	if (a <= b)
 		alu_out |= ALU_L;
 	return 0;
 }
 
-static int and16(unsigned dsta, unsigned srcv)
+static int and16(unsigned dsta, unsigned a, unsigned b)
 {
-	uint16_t r = mmu_mem_read16(dsta) & srcv;
+	uint16_t r = a & b;
 	mmu_mem_write16(dsta, r);
 	logic_flags16(r);
 	return 0;
 }
 
-static int or16(unsigned dsta, unsigned srcv)
+static int or16(unsigned dsta, unsigned a, unsigned b)
 {
-	uint16_t r = mmu_mem_read16(dsta) | srcv;
+	uint16_t r = a | b;
 	mmu_mem_write16(dsta, r);
 	logic_flags16(r);
 	return 0;
 }
 
-static int xor16(unsigned dsta, unsigned srcv)
+static int xor16(unsigned dsta, unsigned a, unsigned b)
 {
-	uint16_t r = mmu_mem_read16(dsta) ^ srcv;
+	uint16_t r = a ^ b;
 	mmu_mem_write16(dsta, r);
 	logic_flags16(r);
 	return 0;
@@ -1700,22 +1698,6 @@ static int loadstore_op(void)
 	}
 }
 
-static int misc2x_special(uint8_t reg)
-{
-	/* The only code we know is 22 32 which seems ot be some kind of cpu
-	   ident/status check. It's not clear if there is a proper supervisor
-	   check involved here for the NZ->Z case and a CPU type check for Z->NZ
-	   or what */
-	if (op == 0x22 && reg == 0x32) {
-		/* CPU ID ?? */
-		alu_out ^= ALU_V;
-		return 0;
-	}
-	fprintf(stderr, "Unknown misc2x special %02X:%02X at %04X\n", op,
-		reg, exec_pc);
-	return 0;
-}
-
 static int misc2x_op(void)
 {
 	unsigned low = 0;
@@ -1723,9 +1705,6 @@ static int misc2x_op(void)
 	if (!(op & 8)) {
 		reg = fetch();
 		low = reg & 0x0F;
-		/* Hack until we understand what 22 32 is about */
-/*		if (op == 0x22 && (reg & 0x0F))
-			return misc2x_special(reg); */
 		reg >>= 4;
 	}
 
@@ -1852,7 +1831,7 @@ static int misc3x_op(void)
 static int alu4x_op(void)
 {
 	unsigned src, dst;
-	if (op != 0x47 && (!(op & 0x08))) {
+	if ((!(op & 0x08))) {
 		dst = fetch();
 		src = dst >> 4;
 		dst &= 0x0F;
@@ -1870,12 +1849,6 @@ static int alu4x_op(void)
 		return xor(dst, src);
 	case 0x45:		/* mov */
 		return mov(dst, src);
-	case 0x46:		/* unused */
-		fprintf(stderr, "Unknown ALU4 op %02X at %04X\n", op,
-			exec_pc);
-		return 0;
-	case 0x47:		/* unused */
-		return block_op(0x47);
 	case 0x48:
 		return add(BL, AL);
 	case 0x49:
@@ -1908,82 +1881,84 @@ static int alu4x_op(void)
  *	a pair to select additional modes.
  *
  *	[sr:3][sx1:1][dr:3][sx0:1]
- *	sx1	sx0
- *	0	0		(sr)	(dr)		as per CPU4
- *	0	1		(sr)	((PC))		sr, (xxxx)
- *	1 	0		(sr)	(PC)		sr, constant
- *	1	1		((sr))	(dr)		indirect, reg
+ *
  */
 static int alu5x_op(void)
 {
 	unsigned src, dst;
-	unsigned addr;
-	unsigned srcv;
-	unsigned dsta;
+	uint16_t addr;
+	uint16_t a; // First argument isn't always dst anymore.
+	uint16_t b;
+	uint16_t dsta;
+	uint16_t movv; // move value is usually source.
+	               // But when is a choice of a memory operand, mov ignores everything else.
 	if (!(op & 0x08)) {
 		dst = fetch();
 		src = dst >> 4;
-		srcv = regpair_read(src & 0x0E);
+		movv = b = regpair_read(src & 0x0E);
 		dsta = regpair_addr(dst & 0x0E);
+		a = regpair_read(dst & 0XE);
 		if (op <= 0x55) {
 			switch(dst & 0x11) {
-			case 0x00:
+			case 0x00: // dst_reg <- src_reg
 				break;
-			case 0x01:
-				addr = fetch() << 8;
-				addr |= fetch();
-				srcv = mmu_mem_read16(addr);
+			case 0x01: // dst_reg <- src_reg OP (direct)
+				       // mov takes (direct)
+				addr = fetch16();
+				movv = b = mmu_mem_read16(addr);
 				break;
-			case 0x10:
-				srcv = fetch() << 8;
-				srcv |= fetch();
+			case 0x10: // dst_reg <- src_reg OP literal
+				       // mov takes literal
+				movv = b = fetch16();
 				break;
-			case 0x11:
-				addr = fetch() << 8;
-				addr |= fetch();
-				dsta = addr;
+			case 0x11: // dst_reg <- (src_reg + disp16) OP dst_reg
+				       // mov takes (src_reg + disp16)
+				addr = fetch16() + b;
+				b = a;
+				movv = a = mmu_mem_read16(addr);
 				break;
 			}
 		}
 	} else {
-		srcv = regpair_read(A);
+		a = regpair_read(B);
+		movv = b = regpair_read(A);
 		dsta = regpair_addr(B);
 	}
 	switch (op) {
 	case 0x50:		/* add */
-		return add16(dsta, srcv);
+		return add16(dsta, a, b);
 	case 0x51:		/* sub */
-		return sub16(dsta, srcv);
+		return sub16(dsta, a, b);
 	case 0x52:		/* and */
-		return and16(dsta, srcv);
+		return and16(dsta, a, b);
 	case 0x53:		/* or */
-		return or16(dsta, srcv);
+		return or16(dsta, a, b);
 	case 0x54:		/* xor */
-		return xor16(dsta, srcv);
+		return xor16(dsta, a, b);
 	case 0x55:		/* mov */
-		return mov16(dsta, srcv);
+		return mov16(dsta, movv);
 	case 0x56:		/* unused */
 	case 0x57:		/* unused */
 		fprintf(stderr, "Unknown ALU5 op %02X at %04X\n", op,
 			exec_pc);
 		return 0;
 	case 0x58:
-		return add16(dsta, srcv);
+		return add16(dsta, a, b);
 	case 0x59:
-		return sub16(dsta, srcv);
+		return sub16(dsta, a, b);
 	case 0x5A:
-		return and16(dsta, srcv);
+		return and16(dsta, a, b);
 	/* These are borrowed for moves */
 	case 0x5B:
-		return mov16(regpair_addr(X), srcv);
+		return mov16(regpair_addr(X), movv);
 	case 0x5C:
-		return mov16(regpair_addr(Y), srcv);
+		return mov16(regpair_addr(Y), movv);
 	case 0x5D:
-		return mov16(regpair_addr(B), srcv);
+		return mov16(regpair_addr(B), movv);
 	case 0x5E:
-		return mov16(regpair_addr(Z), srcv);
+		return mov16(regpair_addr(Z), movv);
 	case 0x5F:
-		return mov16(regpair_addr(S), srcv);
+		return mov16(regpair_addr(S), movv);
 	default:
 		fprintf(stderr, "internal error alu5\n");
 		exit(1);
@@ -2089,6 +2064,10 @@ unsigned cpu6_execute_one(unsigned trace)
 		return misc2x_op();
 	if (op < 0x40)
 		return misc3x_op();
+	if (op == 0x46)
+		return bignum_op();
+	if (op == 0x47)
+		return block_op(0x47);
 	if (op < 0x50)
 		return alu4x_op();
 	if (op == 0x66)
