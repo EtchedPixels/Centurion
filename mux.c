@@ -149,7 +149,6 @@ void mux_write(uint16_t addr, uint8_t val)
 
 	mux[unit].status &= ~MUX_TX_READY;
 	mux[unit].tx_finish_time = get_current_time() + symbol_len * 10;
-	fprintf(stderr, "time: %li, finish: %li\n", get_current_time() / 1000, mux[unit].tx_finish_time / 1000);
 
 	if (mux[unit].out_fd == -1) {
 		/* This MUX unit isn't connected to anything */
@@ -233,7 +232,6 @@ static void check_tx_done() {
 	for (unsigned unit = 0; unit < NUM_MUX_UNITS; unit++) {
 		uint64_t finish = mux[unit].tx_finish_time;
 		if (finish && finish <= time) {
-			fprintf(stderr, "Finished at %li\n", time / 1000);
 			set_write_ready(unit);
 		}
 	}
