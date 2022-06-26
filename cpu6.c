@@ -432,13 +432,17 @@ static uint8_t block_op_getLen(int inst, int op) {
 }
 
 /*
- *	Block operations ?
+ *	Block/String operations
  *
- *	47	40	len-1		src	dst
- *	47	80	len-1		src	dst
+ *	47 ssssmmnn - Take length as byte immediate
+ *	67 ssssmmnn - Take length as AL
  *
- *	We don't know what the other bits do - eg are they addressing
- *	mode bits ?
+ *	s = sub-op
+ *	m = src address mode
+ *	n = dst address mode
+ *
+ *	Not all sub-ops take a length.
+ *	Some sub-ops take additional args, as immediate or implicit reg
  */
 static int block_op(int inst)
 {
@@ -482,6 +486,26 @@ static int block_op(int inst)
 		fprintf(stderr, "%04X: Unknown block xfer %02X\n", cpu6_pc(), op);
 		return 0;
 	}
+}
+
+/* F7 - a 16bit memcpy instruction
+ *
+ * Args
+ *   A - Length
+ *   B - Source
+ *   Y - Dest
+ *
+ *  Appears to leave all registers unmodified?
+ */
+static int memcpy16() {
+	uint16_t len = regpair_read(A);
+	uint16_t sa  = regpair_read(B);
+	uint16_t da  = regpair_read(Y);
+
+	do {
+		mmu_mem_write8(da++, mmu_mem_read8(sa++));
+	} while(len--);
+	return 0;
 }
 
 /*
@@ -1947,6 +1971,8 @@ unsigned cpu6_execute_one(unsigned trace)
 		return cpu6_il_mov();
 	if (op == 0xf6)
 		return cpu6_indexed_loadstore();
+	if (op == 0xf7)
+		return memcpy16();
 	return loadstore_op();
 }
 
