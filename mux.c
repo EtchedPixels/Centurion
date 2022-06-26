@@ -13,7 +13,7 @@ static struct MuxUnit mux[NUM_MUX_UNITS];
  // LOAD writes 0 to F20A before transferring execution to a new binary
 static char rx_ipl_request = 0;
 static char tx_ipl_request = 0;
-static int cause_unit = 0;
+static int irq_cause = 0;
 
 // Set the initial state for all out ports
 void mux_init(void)
@@ -74,6 +74,21 @@ static unsigned int next_char(uint8_t unit)
 
 	mux[unit].lastc = c;
 	return c;
+}
+
+static void mux_assert_irq(unsigned unit, unsigned direction)
+{
+	char ipl = direction ? tx_ipl_request : rx_ipl_request;
+	if (!ipl)
+		return;
+	// Cause register specifies the mux unit ID that caused the interrupt
+	// If we had multiple MUX4 boards, the board ID would be in the upper nibble
+	// I've implemented this as just overwriting the last cause, which will cause issues
+	// Would be interesting to see if the hardware has some kind of queue
+	//
+	// Ken mentions that sometimes key presses would be dropped under heavy loads
+	irq_cause = (unit << 1) | direction;
+	cpu_assert_irq(ipl);
 }
 
 /*
@@ -149,7 +164,6 @@ void mux_write(uint16_t addr, uint8_t val)
 
 	mux[unit].status &= ~MUX_TX_READY;
 	mux[unit].tx_finish_time = get_current_time() + symbol_len * 10;
-	fprintf(stderr, "time: %li, finish: %li\n", get_current_time() / 1000, mux[unit].tx_finish_time / 1000);
 
 	if (mux[unit].out_fd == -1) {
 		/* This MUX unit isn't connected to anything */
@@ -186,9 +200,7 @@ uint8_t mux_read(uint16_t addr)
 		if (tx_ipl_request != 0) {
 			cpu_deassert_irq(tx_ipl_request);
 		}
-		// Returns the mux unit ID that caused the interrupt
-		// If we had multiple MUX4 boards, the board ID would be in the upper nibble
-		return cause_unit << 1;
+		return irq_cause;
 	} else if (addr >= NUM_MUX_UNITS * 2) {
 		fprintf(stderr, "Read from unknown MUX register %x\n", addr);
 		// Any other out-of-band address, we don't know what to do with it
@@ -210,22 +222,14 @@ uint8_t mux_read(uint16_t addr)
 static void set_read_ready(unsigned unit)
 {
 	mux[unit].status |= MUX_RX_READY;
-	if (rx_ipl_request)
-		cpu_assert_irq(rx_ipl_request);
-	// I've implemented this as just overwriting the last cause, which will cause issues
-	// Would be interesting to see if the hardware has some kind of queue
-	//
-	// Ken mentions that sometimes key presses would be dropped under heavy loads
-	cause_unit = unit;
+	mux_assert_irq(unit, MUX_IRQ_RX);
 }
 
 static void set_write_ready(unsigned unit)
 {
 	mux[unit].status |= MUX_TX_READY;
 	mux[unit].tx_finish_time = 0;
-	if (tx_ipl_request)
-		cpu_assert_irq(tx_ipl_request);
-	cause_unit = unit;
+	mux_assert_irq(unit, MUX_IRQ_TX);
 }
 
 static void check_tx_done() {
@@ -233,7 +237,6 @@ static void check_tx_done() {
 	for (unsigned unit = 0; unit < NUM_MUX_UNITS; unit++) {
 		uint64_t finish = mux[unit].tx_finish_time;
 		if (finish && finish <= time) {
-			fprintf(stderr, "Finished at %li\n", time / 1000);
 			set_write_ready(unit);
 		}
 	}

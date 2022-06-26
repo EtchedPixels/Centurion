@@ -31,6 +31,7 @@ static uint64_t cpu_timestamp_ns = 0;
 #define TRACE_FDC	16
 #define TRACE_CMD	32
 #define TRACE_PARITY	64
+#define TRACE_MUX	128
 
 unsigned int trace = 0;
 
@@ -947,9 +948,9 @@ int main(int argc, char *argv[])
 
 		instruction_count++;
 		if (terminate_at && instruction_count >= terminate_at) {
-			printf("\nTerminated after %li instructions\n", instruction_count);
+			printf("\nTerminated after %lli instructions\n", instruction_count);
 			if (trace)
-				fprintf(stderr, "Terminated after %li instructions\n", instruction_count);
+				fprintf(stderr, "Terminated after %lli instructions\n", instruction_count);
 			break;
 		}
 	}
