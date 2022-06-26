@@ -83,10 +83,6 @@ static void mux_assert_irq(unsigned unit, unsigned direction)
 		return;
 	// Cause register specifies the mux unit ID that caused the interrupt
 	// If we had multiple MUX4 boards, the board ID would be in the upper nibble
-	// I've implemented this as just overwriting the last cause, which will cause issues
-	// Would be interesting to see if the hardware has some kind of queue
-	//
-	// Ken mentions that sometimes key presses would be dropped under heavy loads
 	irq_cause = (unit << 1) | direction;
 	cpu_assert_irq(ipl);
 }
@@ -131,6 +127,14 @@ void mux_write(uint16_t addr, uint8_t val)
 		fprintf(stderr, "\nMux, RX Configured to LVL %x\n", val);
 		rx_ipl_request = val;
 		return;
+	} else if (addr == 0xC) {
+		/* OPSYS kernel writes unit number (starting from 1)
+		 * to this register and waits for the interrupt-driven write
+		 * to complete. We suggest that this write forces a TX_READY interrupt
+		 * on the given unit. Before doing so, the output routine actually
+		 * waits for MUX_TX_READY bit to go high using a polled loop
+		 */
+		mux_assert_irq(val - 1, MUX_IRQ_TX);
 	} else if (addr == 0xE) {
 		fprintf(stderr, "\nMux, TX Configured to LVL %x\n", val);
 		tx_ipl_request = val;
@@ -216,7 +220,7 @@ uint8_t mux_read(uint16_t addr)
 		return next_char(unit);	/*( | 0x80; */
 	}
 
-	return mux[unit].status | check_write_ready(unit);
+	return mux[unit].status | check_write_ready(unit) | MUX_CTS;
 }
 
 static void set_read_ready(unsigned unit)
@@ -255,6 +259,7 @@ void mux_poll(void)
 			/* Do not waste time repetitively polling ports,
 			 * which we know are ready
 			 */
+			mux_assert_irq(unit, MUX_IRQ_RX);
 			continue;
 		}
 		int fd = mux[unit].in_fd;
@@ -280,8 +285,10 @@ void mux_poll(void)
 	for (unit = 0; unit < NUM_MUX_UNITS; unit++) {
 		if (mux[unit].status & MUX_RX_READY) {
 			/* Do not waste time repetitively polling ports,
-			 * which we know are ready
+			 * which we know are ready. But keep re-asserting the IRQ
+			 * if configured
 			 */
+			mux_assert_irq(unit, MUX_IRQ_RX);
 			continue;
 		}
 		int fd = mux[unit].in_fd;
