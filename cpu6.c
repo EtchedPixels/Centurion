@@ -1400,7 +1400,6 @@ static int low_op(void)
 			cpu_ipl = popbyte();	/* Loads new IL */
 			/* X is set off the stack and S is propogated */
 			new_pc = regpair_read(X);
-			new_s = regpair_read(S);
 			{
 				uint8_t byte = popbyte();
 				alu_out = byte & (ALU_L | ALU_F | ALU_M | ALU_V);
@@ -1408,7 +1407,6 @@ static int low_op(void)
 				cpu_mmu = byte & 0x07;
 			}
 			regpair_write(X, new_x);
-			regpair_write(S, new_s);
 			pc = new_pc;
 			return 0;
 		}
