@@ -117,14 +117,15 @@ static void mux_assert_irq(unsigned unit, unsigned direction)
 
 /* Bit 0 of control is char pending. The real system uses mark parity so
    we ignore that */
-void mux_write(uint16_t addr, uint8_t val)
+void mux_write(uint16_t addr, uint8_t val, uint32_t trace)
 {
 	unsigned unit, data;
 	addr &= 0xFF;
 
 	if (addr == 0x0A) {
 		// Register 0x0A - set interrupt request level
-		fprintf(stderr, "\nMux, RX Configured to LVL %x\n", val);
+		if (trace)
+			fprintf(stderr, "\nMux, RX Configured to LVL %x\n", val);
 		rx_ipl_request = val;
 		return;
 	} else if (addr == 0xC) {
@@ -136,11 +137,13 @@ void mux_write(uint16_t addr, uint8_t val)
 		 */
 		mux_assert_irq(val - 1, MUX_IRQ_TX);
 	} else if (addr == 0xE) {
-		fprintf(stderr, "\nMux, TX Configured to LVL %x\n", val);
+		if (trace)
+			fprintf(stderr, "\nMux, TX Configured to LVL %x\n", val);
 		tx_ipl_request = val;
 		return;
 	} else if (addr >= NUM_MUX_UNITS * 2) {
-		fprintf(stderr, "\nWrite to unknown MUX register %x=%02x\n", addr, val);
+		if (trace)
+			fprintf(stderr, "\n%04X Write to unknown MUX register %x=%02x\n", cpu6_pc(), addr, val);
 		// Any other out-of-band address, we don't know what to do with it
 		return;
 	}
@@ -190,7 +193,7 @@ void mux_write(uint16_t addr, uint8_t val)
 	}
 }
 
-uint8_t mux_read(uint16_t addr)
+uint8_t mux_read(uint16_t addr, uint32_t trace)
 {
 	unsigned unit, data;
 
@@ -206,7 +209,8 @@ uint8_t mux_read(uint16_t addr)
 		}
 		return irq_cause;
 	} else if (addr >= NUM_MUX_UNITS * 2) {
-		fprintf(stderr, "Read from unknown MUX register %x\n", addr);
+		if (trace)
+			fprintf(stderr, "Read from unknown MUX register %x\n", addr);
 		// Any other out-of-band address, we don't know what to do with it
 		return 0;
 	}
