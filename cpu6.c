@@ -507,6 +507,81 @@ static int memcpy16() {
 	return 0;
 }
 
+/* Various microcode math routines which operate on arbitrary width integers
+ *
+ *	46 llllkkkk ssssmmnn
+ *
+ *	l - size of a operand (typically)
+ *	k - size of b operand
+ *	s - subop
+ *	m - a address mode
+ *	n - b address mode
+ *
+ * Valid sizes are 1 to 16 bytes
+ * Some subops may take extra arguments via implicit registers
+ */
+static int bignum_op() {
+	unsigned sizes = fetch();
+	unsigned a_size = (sizes >> 4) + 1;
+	unsigned b_size = (sizes & 0xf) + 1;
+
+	unsigned mode = fetch();
+
+	if ((mode >> 4) == 9) {
+		// BASECONV
+		// I have not idea how the actual microcode routine works, so here is an approximation
+		// Doesn't handle cases where buffer hasn't been memset to 0xc0
+		unsigned dest_width = reg_read(AL);
+		unsigned base = a_size + 1;
+
+		if (b_size > 8) {
+			fprintf(stderr, "%i byte baseconv too big for our modern 64bit machines\n", b_size);
+			exit(1);
+		}
+		uint16_t dst_addr = get_twobit(mode, 0, dest_width);
+		uint16_t src_addr = get_twobit(mode, 1, b_size);
+
+
+		// Convert to little endian
+		uint64_t num = 0;
+		for (int i=0; i < b_size; i++) {
+			num = num << 8 | mmu_mem_read8(src_addr+i);
+		}
+
+		char buffer[32];
+
+		if (base == 10) {
+			snprintf(buffer, sizeof(buffer), "%lu", num);
+		} else if (base == 16) {
+			snprintf(buffer, sizeof(buffer), "%lX", num);
+		} else {
+			fprintf(stderr, "baseconv, unsupported base %i\n", base);
+			exit(1);
+		}
+
+		// I'm kind of guessing here, but it seems to do this?
+		unsigned actual_width = strlen(buffer);
+		if (actual_width > dest_width) {
+			alu_out = ALU_F;
+			return 0;
+		}
+
+		for (int i=0; i<actual_width; i++) {
+			mmu_mem_write8(dst_addr+i, buffer[i] | 0x80);
+		}
+
+		// apparently A needs to be updated to point after string
+		regpair_write(A, dst_addr + actual_width);
+		return 0;
+	}
+
+	switch (mode >> 4) {
+	default:
+		fprintf(stderr, "Unsupported 46 Bignum op %i\n", mode >> 4);
+		exit(1);
+	}
+}
+
 /*
  *	Load flags
  *	F not touched
