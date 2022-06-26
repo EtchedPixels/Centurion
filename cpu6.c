@@ -14,6 +14,7 @@
  *	(see monitor 84C3)
  */
 
+#include <assert.h>
 #include <stdio.h>
 #include <stdint.h>
 #include <stdlib.h>
@@ -49,8 +50,12 @@ static uint8_t dma_mystery;	/* We don't know what this reg on the AM2901 is
 static uint8_t cpu_sram[256];
 static uint8_t mmu[8][32];
 
+// Standing in for some internal microcode state
+static unsigned twobit_cached_reg = 0;
+
 static void mmu_mem_write8(uint16_t addr, uint8_t val);
 static uint32_t mmu_map(uint16_t addr);
+static void logic_flags16(unsigned r);
 
 /*
  *	DMA engine guesswork
@@ -94,15 +99,13 @@ uint8_t dma_write_cycle(void)
 }
 
 /*
- *	We don't know how the flags are packed into C with the IPL
- *	but they appear to live in the low 4 bits and the lv in the
- *	low 4 bits of the upper byte
+ *	When packed into C, the flags live in the upper 4 bits of the low byte
  */
 
-#define ALU_L	1
-#define ALU_M	2
-#define ALU_F	4
-#define ALU_V	8
+#define ALU_L	0x10
+#define ALU_F	0x20
+#define ALU_M	0x40
+#define ALU_V	0x80
 
 
 /*
@@ -271,6 +274,58 @@ uint8_t popbyte(void)
 	return d;
 }
 
+
+static uint16_t get_twobit(unsigned mode, unsigned idx, unsigned len) {
+	uint16_t addr = 0;
+	unsigned regs;
+	unsigned thismode = mode;
+
+	if (idx == 0)
+		thismode = mode >> 2;
+
+	switch (thismode & 0x3)	{
+	case 0:
+		// EA <- PC
+		addr = fetch16();
+		//fprintf(stderr, "%x EA <- (PC) = %04x\n", idx, addr);
+		break;
+	case 1:
+		// EA <- imm8/imm16 + r1 + r2
+		//fprintf(stderr, "%x EA <- ", idx);
+		regs = fetch();
+		addr =  (regs & 0x10) ? fetch16() : fetch(); // if r1 is odd, do imm16
+		//fprintf(stderr, "%04x", addr);
+		addr += regpair_read((regs >> 4) & 0xe);
+		//fprintf(stderr, " + (%x) %04x", (regs >> 4) & 0xe, regpair_read((regs >> 4) & 0xe));
+		if ((regs & 0xe) != 0) { // ignore r2 if it's A
+			addr += regpair_read(regs & 0xe);
+			//fprintf(stderr, " + (%x) %04x",  regs & 0xe, regpair_read(regs & 0xe));
+		}
+		//fprintf(stderr, " = %04x", addr);
+		break;
+	case 2:
+		// EA <- R
+		// This mode is complicated because it tries to merge two mode 2s into a single byte
+		if (idx == 1 && mode == 0xa) {
+			// previous twobit already fetched our regbyte
+			regs = twobit_cached_reg;
+		} else {
+			twobit_cached_reg = regs = fetch();
+		}
+		if (idx == 0)
+			regs >>= 4;
+		addr = regpair_read(regs & 0xe);
+		//fprintf(stderr, "%x EA <- reg(%x) = %04x\n", idx, regs & 0xe, addr);
+		break;
+	case 3:
+		// EA <- (literal)
+		addr = fetch_literal(len);
+		//fprintf(stderr, "%x EA <- (imm)*0x%02x = %04x\n", idx, len+1, addr);
+		break;
+	}
+	return addr;
+}
+
 /*
  *	The MMU
  *
@@ -292,108 +347,238 @@ static uint32_t mmu_map(uint16_t addr)
 }
 
 /*
- *	MMU load operations
+ *	MMU read/write operations
  *
- *	2E 0C 0xF8|pri addr
- *	2E 1C 0xF8|pri addr
+ *  2E sssrmmnn
  *
- *	Copies the 32bytes of MMU settings for that ipl into the memory
- *	location specified. We've only seen 0C and 1C so it's possible that
- *	the C F or 8 all mean something and there are other ways to specify
- *	the address.
+ *  s - sub-op
+ *  r - read; 0 = write to mmu, 1 = read from mmu
+ *	m - opn1 twobit address mode
+ *	n - mem twobit address mode
  */
-static int mmu_loadop(uint8_t subop)
+static int mmu_transfer_op()
 {
-	uint8_t bank = fetch() - 0xF8;
-	uint16_t addr = fetch16();
-	uint8_t *mb;
-	unsigned n;
+	unsigned subop = fetch();
+	// While opn1 is commonly an immediate, it can actually use any
+	// addressing mode
+	uint8_t opn1 = mmu_mem_read8(get_twobit(subop, 0, 1));
+	// opn1 is in the format xxxxxbbb
+	uint8_t base = opn1 & 0x7; 	// b - page table base
+	uint8_t x = opn1 >> 3; 	// x - meaning depends on subop
 
-	if (bank < 0 || bank > 7) {
-		fprintf(stderr, "MMU bad bank %02X at %04X\n", bank,
-			exec_pc);
-		exit(1);
+
+	uint8_t offset = 0;
+	unsigned len, val;
+
+	switch (subop & 0xe0) {
+		case 0x00: // WPF/RPF - transfer x entries at offset 0
+			len = x + 1;
+		break;
+		case 0x20: // WPF1/RPF1 - transfer 1 entry at offset x
+			len = 1;
+			offset = x;
+		break;
+		case 0x40: // WPF32/RPF32 - transfer (32-x) entries at offset x
+			offset = x;
+			len = 32 - x;
+		break;
+		default:
+			// microcode suggests these are illegal (will trap)
+			fprintf(stderr, "%04X: Illegal 2E op %02X\n", cpu6_pc(), op);
+			return 0;
 	}
 
-	mb = mmu[bank];
-	n = 32;
+	// There is no way to bypass the MMU, so entries are always
+	// transferred to/from virtual addresses
+	// The microcode might have a requirement for this to not be implicit
+	uint16_t addr = get_twobit(subop, 1, len);
 
-	switch(subop) {
-	case 0x0C:
-		/* Question: are these addresses virtual, are they switched as
-		   one or is the MMU translation live on them ? */
-		while(n--)
-			*mb++ = mmu_mem_read8(addr++);
+	switch(subop & 0x10) {
+	case 0x00:
+		while(len--) {
+			assert(base < 8 && offset < 0x20);
+			mmu[base][offset++] = mmu_mem_read8(addr++);
+		}
 		break;
-	case 0x1C:
-		while(n--)
-			mmu_mem_write8(addr++, *mb++);
+	case 0x10:
+		while(len--) {
+			assert(base < 8 && offset < 0x20);
+			val = mmu[base][offset++];
+			mmu_mem_write8(addr++, val);
+
+			// We know this has some flag effects because 8130 relies upon it setting
+			// presumably Z to exit
+			logic_flags16(val);
+		}
 		break;
-	default:
-		fprintf(stderr, "MMU bad subop %02X at %04X\n", bank,
-			exec_pc);
-		exit(1);
 	}
 	return 0;
 }
 
+static uint8_t block_op_getLen(int inst, int op) {
+	if ((op & 0xF0) == 0x00) // binload doesn't take a length
+		return 0;
+
+	if (inst == 0x47) {
+		// 47 instructions take a literal
+		return fetch();
+	} else {
+		// 67 instructions take the length in AL
+		// We aren't 100% sure that this takes AL instead of A
+		// But code that needs a 16bit memcpy seems to use F7 instead
+		return reg_read(AL);
+	}
+}
+
 /*
- *	Block operations ?
+ *	Block/String operations
  *
- *	47	40	len-1		src	dst
- *	47	80	len-1		src	dst
+ *	47 ssssmmnn - Take length as byte immediate
+ *	67 ssssmmnn - Take length as AL
  *
- *	We don't know what the other bits do - eg are they addressing
- *	mode bits ?
+ *	s = sub-op
+ *	m = src address mode
+ *	n = dst address mode
+ *
+ *	Not all sub-ops take a length.
+ *	Some sub-ops take additional args, as immediate or implicit reg
  */
-static int block_op47(void)
+static int block_op(int inst)
 {
 	unsigned op = fetch();
-	unsigned len = fetch();
 	unsigned am = op & 0x0F;
-	unsigned sa;
-	unsigned tmp;
+	unsigned dst_len = block_op_getLen(inst, op) + 1;
+	unsigned src_len = dst_len;
+	uint16_t sa, da;
 	uint8_t fill;
-        
-	switch (am) {
-	case 0x00:
-		sa = fetch16();
-		break;
-	case 0x0C:
-		// A literal for memset is always 1-byte long
-		tmp = (op == 0x9C) ? 0 : len;
-		sa = fetch_literal(tmp + 1);
-		break;
-	default:
-		fprintf(stderr, "%04X: Unknown addressing mode %02X for block xfer\n", cpu6_pc(), am);
-		return 0;
-	}
-	unsigned da = fetch16();
+
+	// memset only reads the source once
+	if ((op & 0xF0) == 0x90)
+		src_len = 1;
+
+	sa = get_twobit(am, 0, src_len);
+	da = get_twobit(am, 1, dst_len);
+
 	switch(op & 0xF0) {
 	case 0x40:
-		do {
+		while(dst_len--) {
 			mmu_mem_write8(da++, mmu_mem_read8(sa++));
-		} while(len--);
+		};
 		return 0;
 	case 0x80:
 		alu_out |= ALU_V;
-		do {
+		while (dst_len--) {
 			if(mmu_mem_read8(da++) !=
 				mmu_mem_read8(sa++)) {
 				alu_out &= ~ALU_V;
 				break;
 			}
-		} while(len--);
+		}
 		return 0;
 	case 0x90:
-	        fill = mmu_mem_read8(sa);
-		do {
+		fill = mmu_mem_read8(sa);
+		while (dst_len--) {
 			mmu_mem_write8(da++, fill);
-		} while (len--);
+		}
 		return 0;
 	default:
 		fprintf(stderr, "%04X: Unknown block xfer %02X\n", cpu6_pc(), op);
 		return 0;
+	}
+}
+
+/* F7 - a 16bit memcpy instruction
+ *
+ * Args
+ *   A - Length
+ *   B - Source
+ *   Y - Dest
+ *
+ *  Appears to leave all registers unmodified?
+ */
+static int memcpy16() {
+	uint16_t len = regpair_read(A);
+	uint16_t sa  = regpair_read(B);
+	uint16_t da  = regpair_read(Y);
+
+	do {
+		mmu_mem_write8(da++, mmu_mem_read8(sa++));
+	} while(len--);
+	return 0;
+}
+
+/* Various microcode math routines which operate on arbitrary width integers
+ *
+ *	46 llllkkkk ssssmmnn
+ *
+ *	l - size of a operand (typically)
+ *	k - size of b operand
+ *	s - subop
+ *	m - a address mode
+ *	n - b address mode
+ *
+ * Valid sizes are 1 to 16 bytes
+ * Some subops may take extra arguments via implicit registers
+ */
+static int bignum_op() {
+	unsigned sizes = fetch();
+	unsigned a_size = (sizes >> 4) + 1;
+	unsigned b_size = (sizes & 0xf) + 1;
+
+	unsigned mode = fetch();
+
+	if ((mode >> 4) == 9) {
+		// BASECONV
+		// I have not idea how the actual microcode routine works, so here is an approximation
+		// Doesn't handle cases where buffer hasn't been memset to 0xc0
+		unsigned dest_width = reg_read(AL);
+		unsigned base = a_size + 1;
+
+		if (b_size > 8) {
+			fprintf(stderr, "%i byte baseconv too big for our modern 64bit machines\n", b_size);
+			exit(1);
+		}
+		uint16_t dst_addr = get_twobit(mode, 0, dest_width);
+		uint16_t src_addr = get_twobit(mode, 1, b_size);
+
+
+		// Convert to little endian
+		uint64_t num = 0;
+		for (int i=0; i < b_size; i++) {
+			num = num << 8 | mmu_mem_read8(src_addr+i);
+		}
+
+		char buffer[32];
+
+		if (base == 10) {
+			snprintf(buffer, sizeof(buffer), "%lu", num);
+		} else if (base == 16) {
+			snprintf(buffer, sizeof(buffer), "%lX", num);
+		} else {
+			fprintf(stderr, "baseconv, unsupported base %i\n", base);
+			exit(1);
+		}
+
+		// I'm kind of guessing here, but it seems to do this?
+		unsigned actual_width = strlen(buffer);
+		if (actual_width > dest_width) {
+			alu_out = ALU_F;
+			return 0;
+		}
+
+		for (int i=0; i<actual_width; i++) {
+			mmu_mem_write8(dst_addr+i, buffer[i] | 0x80);
+		}
+
+		// apparently A needs to be updated to point after string
+		regpair_write(A, dst_addr + actual_width);
+		return 0;
+	}
+
+	switch (mode >> 4) {
+	default:
+		fprintf(stderr, "Unsupported 46 Bignum op %i\n", mode >> 4);
+		exit(1);
 	}
 }
 
@@ -614,9 +799,9 @@ static int inc(unsigned reg, unsigned val)
  *	FF->0 expects !F !L M
  *
  */
-static int dec(unsigned reg)
+static int dec(unsigned reg, unsigned val)
 {
-	uint8_t r = reg_read(reg) - 1;
+	uint8_t r = reg_read(reg) - val;
 	reg_write(reg, r);
 	alu_out &= ~(ALU_L | ALU_V | ALU_M | ALU_F);
 	if (r == 0)
@@ -641,9 +826,9 @@ static int clr(unsigned reg, unsigned v)
 /*
  *	Sets all the flags but rule not clear
  */
-static int not(unsigned reg)
+static int not(unsigned reg, unsigned val)
 {
-	uint8_t r = ~reg_read(reg);
+	uint8_t r = ~reg_read(reg) + val;
 	reg_write(reg, r);
 	logic_flags(r);
 	return 0;
@@ -807,48 +992,43 @@ static int mov(unsigned dst, unsigned src)
 
 /* 16bit versions */
 
-static int inc16(unsigned reg, unsigned val)
+static uint16_t inc16(uint16_t a, uint16_t imm)
 {
-	uint16_t r = regpair_read(reg);
-	regpair_write(reg, r + val);
-	arith_flags(r + val, r, val);
-	return 0;
+	arith_flags(a + imm, a, imm);
+	return a + imm;
 }
 
-static int dec16(unsigned reg)
+static uint16_t dec16(uint16_t a, uint16_t imm)
 {
-	uint16_t r = regpair_read(reg) - 1;
-	regpair_write(reg, r);
+	uint16_t r = a - imm;
 	alu_out &= ~(ALU_L | ALU_V | ALU_M | ALU_F);
 	if ((r & 0xFFFF) == 0)
 		alu_out |= ALU_V;
 	if (r & 0x8000)
 		alu_out |= ALU_M;
-	return 0;
+	return r;
 }
 
 /* Assume behaviour matches CLR */
-static int clr16(unsigned reg, unsigned v)
+static uint16_t clr16(uint16_t a, uint16_t imm)
 {
-	regpair_write(reg, v);
 	alu_out &= ~(ALU_F | ALU_L | ALU_M);
-/*	if (v == 0) */
+/*	if (imm == 0) */
 		alu_out |= ALU_V;
-	return 0;
+	return imm;
 }
 
-static int not16(unsigned reg)
+static uint16_t not16(uint16_t a, uint16_t imm)
 {
-	uint16_t r = ~regpair_read(reg);
-	regpair_write(reg, r);
+	uint16_t r = (~a) + imm;
 	logic_flags16(r);
-	return 0;
+	return r;
 }
 
-static int sra16(unsigned reg, unsigned count)
+static uint16_t sra16(uint16_t a, uint16_t count)
 {
 	uint16_t v;
-	uint16_t r = regpair_read(reg);
+	uint16_t r = a;
 
 	while (count--) {
 		v = r >> 1;
@@ -857,14 +1037,13 @@ static int sra16(unsigned reg, unsigned count)
 		shift_flags16(r & 1, v);
 		r = v;
 	}
-	regpair_write(reg, r);
-	return 0;
+	return r;
 }
 
-static int sll16(unsigned reg, unsigned count)
+static uint16_t sll16(uint16_t a, uint16_t count)
 {
 	uint16_t v;
-	uint16_t r = regpair_read(reg);
+	uint16_t r = a;
 
 	while (count--) {
 		v = r << 1;
@@ -879,13 +1058,12 @@ static int sll16(unsigned reg, unsigned count)
 		}
 		r = v;
 	}
-	regpair_write(reg, r);
-	return 0;
+	return r;
 }
 
-static int rrc16(unsigned reg, unsigned count)
+static uint16_t rrc16(uint16_t a, uint16_t count)
 {
-	uint16_t r = regpair_read(reg);
+	uint16_t r = a;
 	uint16_t c;
 
 	while (count--) {
@@ -896,13 +1074,12 @@ static int rrc16(unsigned reg, unsigned count)
 
 		shift_flags16(c, r);
 	}
-	regpair_write(reg, r);
-	return 0;
+	return r;
 }
 
-static int rlc16(unsigned reg, unsigned count)
+static uint16_t rlc16(uint16_t a, uint16_t count)
 {
-	uint16_t r = regpair_read(reg);
+	uint16_t r = a;
 	uint16_t c;
 
 	while (count--) {
@@ -921,52 +1098,49 @@ static int rlc16(unsigned reg, unsigned count)
 			break;
 		}
 	}
-	regpair_write(reg, r);
-	return 0;
+	return r;
 }
 
-static int add16(unsigned dsta, unsigned s)
+static int add16(unsigned dsta, unsigned a, unsigned b)
 {
-	unsigned d = mmu_mem_read16(dsta);
-	mmu_mem_write16(dsta, d + s);
-	arith_flags16(d + s, d, s);
+	mmu_mem_write16(dsta, a + b);
+	arith_flags16(a + b, a, b);
 	alu_out &= ~ALU_L;
-	if ((s + d) & 0x10000)
+	if ((b + a) & 0x10000)
 		alu_out |= ALU_L;
 	return 0;
 }
 
-static int sub16(unsigned dsta, unsigned s)
+static int sub16(unsigned dsta, unsigned a, unsigned b)
 {
-	unsigned d = mmu_mem_read16(dsta);
-	unsigned r = s - d;
+	unsigned r = b - a;
 	mmu_mem_write16(dsta, r);
-	sub_flags16(r, s, d);
+	sub_flags16(r, b, a);
 	alu_out &= ~ALU_L;
-	if (d <= s)
+	if (a <= b)
 		alu_out |= ALU_L;
 	return 0;
 }
 
-static int and16(unsigned dsta, unsigned srcv)
+static int and16(unsigned dsta, unsigned a, unsigned b)
 {
-	uint16_t r = mmu_mem_read16(dsta) & srcv;
+	uint16_t r = a & b;
 	mmu_mem_write16(dsta, r);
 	logic_flags16(r);
 	return 0;
 }
 
-static int or16(unsigned dsta, unsigned srcv)
+static int or16(unsigned dsta, unsigned a, unsigned b)
 {
-	uint16_t r = mmu_mem_read16(dsta) | srcv;
+	uint16_t r = a | b;
 	mmu_mem_write16(dsta, r);
 	logic_flags16(r);
 	return 0;
 }
 
-static int xor16(unsigned dsta, unsigned srcv)
+static int xor16(unsigned dsta, unsigned a, unsigned b)
 {
-	uint16_t r = mmu_mem_read16(dsta) ^ srcv;
+	uint16_t r = a ^ b;
 	mmu_mem_write16(dsta, r);
 	logic_flags16(r);
 	return 0;
@@ -1211,10 +1385,13 @@ static int low_op(void)
 		 *              -- Ken Romain
 		 */
 	case 0x0E:		/* DELAY */
+		advance_time(4.5 * 1000000.0);
 		break;
 	case 0x0F:
-		/* Save PC to P, skip a byte off stack, load PC from X, load X
-		   from stack, load IPL from stack, load mmu tag from stack */
+	    /* RSYS - Does the inverse of JSYS
+		 * Save PC to P, skip a byte off stack, load PC from X, load X
+		 * from stack, load IPL from stack, load mmu tag from stack
+		 */
 		{
 			uint16_t new_x, new_pc, new_s;
 			regpair_write(P, pc);
@@ -1223,15 +1400,37 @@ static int low_op(void)
 			cpu_ipl = popbyte();	/* Loads new IL */
 			/* X is set off the stack and S is propogated */
 			new_pc = regpair_read(X);
-			new_s = regpair_read(S);
-			/* We flip MMU context after all the POP cases */
-			cpu_mmu = popbyte() & 0x07;
+			{
+				uint8_t byte = popbyte();
+				alu_out = byte & (ALU_L | ALU_F | ALU_M | ALU_V);
+				/* We flip MMU context after all the POP cases */
+				cpu_mmu = byte & 0x07;
+			}
 			regpair_write(X, new_x);
-			regpair_write(S, new_s);
 			pc = new_pc;
 			return 0;
 		}
 	}
+	return 0;
+}
+
+/* JSYS - System call
+ *
+ *	66 {arg}
+ *
+ * Pushes current state, switches to mmu bank zero and jumps to 0x100
+ */
+static int jsys_op(void)
+{
+	uint8_t arg = fetch();
+	pushbyte(alu_out | cpu_mmu);  // Push CCR and Page Table Base
+	pushbyte(cpu_ipl & 0xf);      // Push current level
+	push(regpair_read(X));        // Push X
+	regpair_write(X, pc);         // X <- PC
+
+	pushbyte(arg);                // Push arg
+	cpu_mmu = 0;                  // Switch to mmu bank 0
+	pc = 0x100;                   // jump to 0x100
 	return 0;
 }
 
@@ -1281,25 +1480,6 @@ static int dma_op(void)
 			op, exec_pc);
 		break;
 	}
-	return 0;
-}
-
-/*
- *	We know this has some flag effects because 8130 relies upon it setting
- *	presumably Z to exit
- *
- *	Weirdnesses
- *	2E 1C and 2E 0C appear to be special
- */
-static int move_op(void)
-{
-	op = fetch();
-	/* Seem to be some strange gaps here */
-	if (op == 0x0C || op == 0x1C)
-		return mmu_loadop(op);
-	/* Guesswork at this point */
-	fprintf(stderr, "Unknown 0x2E op %02X at %04X\n", op, exec_pc);
-	mov16(op >> 4, op & 0x0F);
 	return 0;
 }
 
@@ -1516,22 +1696,6 @@ static int loadstore_op(void)
 	}
 }
 
-static int misc2x_special(uint8_t reg)
-{
-	/* The only code we know is 22 32 which seems ot be some kind of cpu
-	   ident/status check. It's not clear if there is a proper supervisor
-	   check involved here for the NZ->Z case and a CPU type check for Z->NZ
-	   or what */
-	if (op == 0x22 && reg == 0x32) {
-		/* CPU ID ?? */
-		alu_out ^= ALU_V;
-		return 0;
-	}
-	fprintf(stderr, "Unknown misc2x special %02X:%02X at %04X\n", op,
-		reg, exec_pc);
-	return 0;
-}
-
 static int misc2x_op(void)
 {
 	unsigned low = 0;
@@ -1539,9 +1703,6 @@ static int misc2x_op(void)
 	if (!(op & 8)) {
 		reg = fetch();
 		low = reg & 0x0F;
-		/* Hack until we understand what 22 32 is about */
-/*		if (op == 0x22 && (reg & 0x0F))
-			return misc2x_special(reg); */
 		reg >>= 4;
 	}
 
@@ -1549,11 +1710,11 @@ static int misc2x_op(void)
 	case 0x20:
 		return inc(reg, low + 1);
 	case 0x21:
-		return dec(reg);
+		return dec(reg, low + 1);
 	case 0x22:
 		return clr(reg, low);
 	case 0x23:
-		return not(reg);
+		return not(reg, low);
 	case 0x24:
 		return sra(reg, low + 1);
 	case 0x25:
@@ -1565,11 +1726,11 @@ static int misc2x_op(void)
 	case 0x28:
 		return inc(AL, 1);
 	case 0x29:
-		return dec(AL);
+		return dec(AL, 1);
 	case 0x2A:
 		return clr(AL, 0);
 	case 0x2B:
-		return not(AL);
+		return not(AL, 0);
 	case 0x2C:
 		return sra(AL, 1);
 	case 0x2D:
@@ -1577,7 +1738,7 @@ static int misc2x_op(void)
 		/* On CPU 4 these would be inc XL/dec XL but they are not present and
 		   X is almost always handled as a 16bit register only */
 	case 0x2E:
-		return move_op();
+		return mmu_transfer_op();
 	case 0x2F:
 		return dma_op();
 	default:
@@ -1586,55 +1747,81 @@ static int misc2x_op(void)
 	}
 }
 
-/* Like misc2x but word */
-/* TODO; this has some kind of extended mode io CPU6 we don't yet fully understand */
-static int misc3x_op(void)
+static uint16_t misc3x_op_impl(unsigned op, uint16_t val, unsigned imm)
 {
-	unsigned low = 0;
-	unsigned reg = A;
-	if (!(op & 8)) {
-		reg = fetch();
-		low = reg & 0x0F;
-		reg >>= 4;
-	}
-
 	switch (op) {
 	case 0x30:
-		return inc16(reg, low + 1);
+		return inc16(val, imm + 1);
 	case 0x31:
-		return dec16(reg);
+		return dec16(val, imm + 1);
 	case 0x32:
-		return clr16(reg, low);
+		return clr16(val, imm);
 	case 0x33:
-		return not16(reg);
+		return not16(val, imm);
 	case 0x34:
-		return sra16(reg, low + 1);
+		return sra16(val, imm + 1);
 	case 0x35:
-		return sll16(reg, low + 1);
+		return sll16(val, imm + 1);
 	case 0x36:
-		return rrc16(reg, low + 1);
+		return rrc16(val, imm + 1);
 	case 0x37:
-		return rlc16(reg, low + 1);
+		return rlc16(val, imm + 1);
 	case 0x38:
-		return inc16(A, 1);
+		return inc16(val, 1);
 	case 0x39:
-		return dec16(A);
+		return dec16(val, 1);
 	case 0x3A:
-		return clr16(A, 0);
+		return clr16(val, 0);
 	case 0x3B:
-		return not16(A);
+		return not16(val, 0);
 	case 0x3C:
-		return sra16(A, 1);
+		return sra16(val, 1);
 	case 0x3D:
-		return sll16(A, 1);
-	case 0x3E:
-		return inc16(X, 1);
-	case 0x3F:
-		return dec16(X);
+		return sll16(val, 1);
 	default:
-		fprintf(stderr, "internal error misc3\n");
+		fprintf(stderr, "internal error misc3 %x\n", op);
 		exit(1);
 	}
+}
+
+/* Like misc2x but word
+ * If the explicit register is odd, it operates on memory
+*/
+static int misc3x_op(void)
+{
+	// Special cases that don't fit general pattern
+	if (op == 0x3E) {
+		regpair_write(X, inc16(regpair_read(X), 1));
+		return 0;
+	}
+	if (op == 0x3F) {
+		regpair_write(X, dec16(regpair_read(X), 1));
+		return 0;
+	}
+
+	if (op & 8) {
+		// Implicit ops that work on A
+		regpair_write(A, misc3x_op_impl(op, regpair_read(A), 0));
+		return 0;
+	}
+
+	unsigned opn = fetch();
+	unsigned imm = opn & 0xf;
+	unsigned reg = (opn >> 4) & 0xe;
+	if ((opn & 0x10) == 0) {
+		// If register is even, operate on register
+		regpair_write(reg, misc3x_op_impl(op, regpair_read(reg), imm));
+		return 0;
+	}
+
+	// Otherwise, we do a memory read-modify-write operation
+	uint16_t addr = fetch16();
+	if (reg != A) {	// indexed
+		addr += regpair_read(reg);
+	}
+	uint16_t result = misc3x_op_impl(op, mmu_mem_read16(addr), imm);
+	mmu_mem_write16(addr, result);
+	return 0;
 }
 
 /* Mostly ALU operations on AL */
@@ -1642,7 +1829,7 @@ static int misc3x_op(void)
 static int alu4x_op(void)
 {
 	unsigned src, dst;
-	if (op != 0x47 && (!(op & 0x08))) {
+	if ((!(op & 0x08))) {
 		dst = fetch();
 		src = dst >> 4;
 		dst &= 0x0F;
@@ -1660,12 +1847,6 @@ static int alu4x_op(void)
 		return xor(dst, src);
 	case 0x45:		/* mov */
 		return mov(dst, src);
-	case 0x46:		/* unused */
-		fprintf(stderr, "Unknown ALU4 op %02X at %04X\n", op,
-			exec_pc);
-		return 0;
-	case 0x47:		/* unused */
-		return block_op47();
 	case 0x48:
 		return add(BL, AL);
 	case 0x49:
@@ -1698,88 +1879,103 @@ static int alu4x_op(void)
  *	a pair to select additional modes.
  *
  *	[sr:3][sx1:1][dr:3][sx0:1]
- *	sx1	sx0
- *	0	0		(sr)	(dr)		as per CPU4
- *	0	1		(sr)	((PC))		sr, (xxxx)
- *	1 	0		(sr)	(PC)		sr, constant
- *	1	1		((sr))	(dr)		indirect, reg
+ *
  */
 static int alu5x_op(void)
 {
 	unsigned src, dst;
-	unsigned addr;
-	unsigned srcv;
-	unsigned dsta;
+	uint16_t addr;
+	uint16_t a; // First argument isn't always dst anymore.
+	uint16_t b;
+	uint16_t dsta;
+	uint16_t movv; // move value is usually source.
+	               // But when is a choice of a memory operand, mov ignores everything else.
 	if (!(op & 0x08)) {
 		dst = fetch();
 		src = dst >> 4;
-		srcv = regpair_read(src & 0x0E);
+		movv = b = regpair_read(src & 0x0E);
 		dsta = regpair_addr(dst & 0x0E);
+		a = regpair_read(dst & 0XE);
 		if (op <= 0x55) {
 			switch(dst & 0x11) {
-			case 0x00:
+			case 0x00: // dst_reg <- src_reg
 				break;
-			case 0x01:
-				addr = fetch() << 8;
-				addr |= fetch();
-				srcv = mmu_mem_read16(addr);
+			case 0x01: // dst_reg <- src_reg OP (direct)
+				       // mov takes (direct)
+				addr = fetch16();
+				movv = b = mmu_mem_read16(addr);
 				break;
-			case 0x10:
-				srcv = fetch() << 8;
-				srcv |= fetch();
+			case 0x10: // dst_reg <- src_reg OP literal
+				       // mov takes literal
+				movv = b = fetch16();
 				break;
-			case 0x11:
-				addr = fetch() << 8;
-				addr |= fetch();
-				dsta = addr;
+			case 0x11: // dst_reg <- (src_reg + disp16) OP dst_reg
+				       // mov takes (src_reg + disp16)
+				addr = fetch16() + b;
+				b = a;
+				movv = a = mmu_mem_read16(addr);
 				break;
 			}
 		}
 	} else {
-		srcv = regpair_read(A);
+		a = regpair_read(B);
+		movv = b = regpair_read(A);
 		dsta = regpair_addr(B);
 	}
 	switch (op) {
 	case 0x50:		/* add */
-		return add16(dsta, srcv);
+		return add16(dsta, a, b);
 	case 0x51:		/* sub */
-		return sub16(dsta, srcv);
+		return sub16(dsta, a, b);
 	case 0x52:		/* and */
-		return and16(dsta, srcv);
+		return and16(dsta, a, b);
 	case 0x53:		/* or */
-		return or16(dsta, srcv);
+		return or16(dsta, a, b);
 	case 0x54:		/* xor */
-		return xor16(dsta, srcv);
+		return xor16(dsta, a, b);
 	case 0x55:		/* mov */
-		return mov16(dsta, srcv);
+		return mov16(dsta, movv);
 	case 0x56:		/* unused */
 	case 0x57:		/* unused */
 		fprintf(stderr, "Unknown ALU5 op %02X at %04X\n", op,
 			exec_pc);
 		return 0;
 	case 0x58:
-		return add16(dsta, srcv);
+		return add16(dsta, a, b);
 	case 0x59:
-		return sub16(dsta, srcv);
+		return sub16(dsta, a, b);
 	case 0x5A:
-		return and16(dsta, srcv);
+		return and16(dsta, a, b);
 	/* These are borrowed for moves */
 	case 0x5B:
-		return mov16(regpair_addr(X), srcv);
+		return mov16(regpair_addr(X), movv);
 	case 0x5C:
-		return mov16(regpair_addr(Y), srcv);
+		return mov16(regpair_addr(Y), movv);
 	case 0x5D:
-		return mov16(regpair_addr(B), srcv);
+		return mov16(regpair_addr(B), movv);
 	case 0x5E:
-		return mov16(regpair_addr(Z), srcv);
+		return mov16(regpair_addr(Z), movv);
 	case 0x5F:
-		fprintf(stderr, "srcv %x regpair_addr(%x)\n", srcv,
-			regpair_addr(S));
-		return mov16(regpair_addr(S), srcv);
+		return mov16(regpair_addr(S), movv);
 	default:
 		fprintf(stderr, "internal error alu5\n");
 		exit(1);
 	}
+}
+
+/* It's not entirely clear what these instructions are for
+ * they set Level 1's AH to 0 and -1
+ *
+ * Instruction 1F branches based on that reg, but doesn't show up in disassembly of LOAD
+ * Disassembly of LOAD hints that it might disable the timer decrementer
+ */
+static int semaphore_op() {
+	if (op == 0xb6)
+		cpu_sram[0x10] = 0xff;
+	if (op == 0xc6)
+		cpu_sram[0x10] = 0x00;
+
+	return 0;
 }
 
 /*
@@ -1850,10 +2046,10 @@ unsigned cpu6_execute_one(unsigned trace)
 	op = fetch();
 	if (trace) {
 		fprintf(stderr,
-			"%02X %s A:%04X  B:%04X X:%04X Y:%04X Z:%04X S:%04X C:%04X | ",
+			"%02X %s A:%04X  B:%04X X:%04X Y:%04X Z:%04X S:%04X C:%04X LVL:%x MAP:%x | ",
 			op, flagcode(), regpair_read(A), regpair_read(B),
 			regpair_read(X), regpair_read(Y), regpair_read(Z),
-			regpair_read(S), regpair_read(C));
+			regpair_read(S), regpair_read(C), cpu_ipl, cpu_mmu);
 		disassemble(op);
 	}
 	if (op < 0x10)
@@ -1866,18 +2062,30 @@ unsigned cpu6_execute_one(unsigned trace)
 		return misc2x_op();
 	if (op < 0x40)
 		return misc3x_op();
+	if (op == 0x46)
+		return bignum_op();
+	if (op == 0x47)
+		return block_op(0x47);
 	if (op < 0x50)
 		return alu4x_op();
+	if (op == 0x66)
+		return jsys_op();
 	if (op < 0x60)
 		return alu5x_op();
+	if (op == 0x67)
+		return block_op(0x67);
 	if (op < 0x70)
 		return x_op();
 	if (op < 0x80)
 		return jump_op();
+	if (op == 0xb6 || op == 0xc6)
+		return semaphore_op();
 	if (op == 0xd7 || op == 0xe6)
 		return cpu6_il_mov();
 	if (op == 0xf6)
 		return cpu6_indexed_loadstore();
+	if (op == 0xf7)
+		return memcpy16();
 	return loadstore_op();
 }
 

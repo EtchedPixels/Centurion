@@ -39,6 +39,10 @@ static const char *r16name(unsigned n)
 	return r16map[n];
 }
 
+static uint16_t get8d(unsigned rpc)
+{
+	return mmu_mem_read8_debug(rpc);
+}
 static uint16_t get16d(unsigned rpc)
 {
 	uint16_t n = mmu_mem_read8_debug(rpc) << 8;
@@ -81,7 +85,7 @@ static void disaddr(unsigned rpc, unsigned size, unsigned op,
 	switch (op) {
 	case 0:
 		if (size == 1)
-			fprintf(stderr, "%02X\n", mmu_mem_read8_debug(rpc));
+			fprintf(stderr, "%02X", mmu_mem_read8_debug(rpc));
 		else
 			dis16d(rpc);
 		break;
@@ -182,7 +186,7 @@ static void dis_block_op(unsigned addr)
 
 static const char *op0name[] = {
 	"HLT", "NOP", "SF", "RF", "EI", "DI", "SL", "RL",
-	"CL", "RSR", "RI", "RIM", "ELO", "PCX", "DLY", "SYSRET"
+	"CL", "RSR", "RI", "RIM", "ELO", "PCX", "DLY", "RSYS"
 };
 
 static const char *braname[] = {
@@ -331,6 +335,10 @@ void disassemble(unsigned op)
 	}
 	if (op < 0x60) {
 		fprintf(stderr, "XA%c\n", "XYBZS"[op - 0x5B]);
+		return;
+	}
+	if (op == 0x66) {
+		fprintf(stderr, "JSYS %02X\n", get8d(rpc));
 		return;
 	}
 	if (op < 0x70) {

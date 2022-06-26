@@ -22,6 +22,7 @@
 static unsigned finch;		/* Finch or original FDC */
 
 volatile unsigned int emulator_done;
+static uint64_t cpu_timestamp_ns = 0;
 
 #define TRACE_MEM_RD	1
 #define TRACE_MEM_WR	2
@@ -30,6 +31,7 @@ volatile unsigned int emulator_done;
 #define TRACE_FDC	16
 #define TRACE_CMD	32
 #define TRACE_PARITY	64
+#define TRACE_MUX	128
 
 unsigned int trace = 0;
 
@@ -770,6 +772,11 @@ static uint8_t do_mem_read8(uint32_t addr, int dis)
 
 uint8_t mem_read8(uint32_t addr)
 {
+	// Extremely simple timing model where we assume each CPU memory
+	// access takes exactly 3 cycles (600ns), and the microcode is
+	// never doing things between memory accesses.
+	cpu_timestamp_ns += 600;
+
 	uint8_t r = do_mem_read8(addr, 0);
 	if (trace & TRACE_MEM_RD)
 		if (addr > 0xFF || (trace & TRACE_MEM_REG))
@@ -807,6 +814,14 @@ void mem_write8(uint32_t addr, uint8_t val)
 	mem[addr] = val;
 }
 
+uint64_t get_current_time() {
+	return cpu_timestamp_ns;
+}
+
+void advance_time(uint64_t nanoseconds) {
+	cpu_timestamp_ns += nanoseconds;
+}
+
 void halt_system(void)
 {
 	printf("System halted at %04X\n", cpu6_pc());
@@ -830,7 +845,7 @@ static void load_rom(const char *name, uint32_t addr, uint16_t len)
 void usage(void)
 {
 	fprintf(stderr,
-		"centurion [-l port] [-d] [-s switches] [-S diagswitches] [-t trace]\n");
+		"centurion [-l port] [-d] [-s switches] [-S diagswitches] [-t trace] [-T terminateAfter]\n");
 	exit(1);
 }
 
@@ -838,10 +853,12 @@ int main(int argc, char *argv[])
 {
 	int opt;
 	unsigned port = 0;
+	int64_t terminate_at = 0;
+	int64_t instruction_count = 0;
 
 	mux_init();
 
-	while ((opt = getopt(argc, argv, "dFl:s:S:t:")) != -1) {
+	while ((opt = getopt(argc, argv, "dFl:s:S:t:T:")) != -1) {
 		switch (opt) {
 		case 'd':
 			diag = 1;
@@ -862,6 +879,9 @@ int main(int argc, char *argv[])
 			break;
 		case 't':
 			trace = atoi(optarg);
+			break;
+		case 'T':
+			terminate_at = atol(optarg);
 			break;
 		default:
 			usage();
@@ -925,6 +945,14 @@ int main(int argc, char *argv[])
 		}
 		/* Update peripherals state */
 		mux_poll();
+
+		instruction_count++;
+		if (terminate_at && instruction_count >= terminate_at) {
+			printf("\nTerminated after %lli instructions\n", instruction_count);
+			if (trace)
+				fprintf(stderr, "Terminated after %lli instructions\n", instruction_count);
+			break;
+		}
 	}
 	return 0;
 }

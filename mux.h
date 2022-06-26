@@ -9,11 +9,16 @@ struct MuxUnit
         int out_fd;
         unsigned char status;
         unsigned char lastc;
+        uint64_t tx_finish_time;
 };
 
 /* Status register bits */
 #define MUX_RX_READY (1 << 0)
 #define MUX_TX_READY (1 << 1)
+
+/* Interrupt status register bits */
+#define MUX_IRQ_RX 0
+#define MUX_IRQ_TX 1
 
 void mux_init(void);
 void mux_attach(unsigned unit, int in_fd, int out_fd);
