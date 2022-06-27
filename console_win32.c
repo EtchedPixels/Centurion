@@ -63,7 +63,7 @@ unsigned int tty_check_writable(int fd)
         return 1;
 }
 
-int tty_check_readable(int fd)
+static int tty_check_readable(int fd)
 {
         DWORD r;
 
@@ -90,4 +90,28 @@ int tty_check_readable(int fd)
                 fprintf(stderr, "Unexpected WaitForMultipleObject() return value in MUX: %ld\n", r);
                 exit(1);
         }
+}
+
+void mux_poll_fds(struct MuxUnit* mux, unsigned trace)
+{
+	int unit;
+
+	for (unit = 0; unit < NUM_MUX_UNITS; unit++) {
+		int ifd = mux[unit].in_fd;
+		int ofd = mux[unit].out_fd;
+
+		/* Do not waste time repetitively polling ports,
+		 * which we know are ready.
+		 */
+		if (!(ifd == -1 || mux[unit].status & MUX_RX_READY)) {
+                        if (tty_check_readable(ifd))
+                                mux_set_read_ready(unit, trace);
+		}
+                if (ofd == -1) {
+                        mux_set_write_ready(unit, trace);
+                } else if (!(mux[unit].status & MUX_TX_READY)) {
+                        if (tty_check_writable(ofd))
+                                mux_set_write_ready(unit, trace);
+		}
+	}
 }

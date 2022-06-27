@@ -10,8 +10,7 @@ struct MuxUnit
         unsigned char status;
         unsigned char lastc;
         int baud;
-        uint64_t tx_finish_time;
-        uint64_t rx_finish_time;
+        unsigned char tx_done;
 };
 
 /* Status register bits */
@@ -22,12 +21,16 @@ struct MuxUnit
 /* Interrupt status register bits */
 #define MUX_IRQ_RX 0
 #define MUX_IRQ_TX 1
+#define MUX_UNIT_MASK 0x06
 
 void mux_init(void);
 void mux_attach(unsigned unit, int in_fd, int out_fd);
-void tty_init(void);
-void net_init(unsigned short port);
 void mux_poll(unsigned trace);
 
 void mux_write(uint16_t addr, uint8_t val, uint32_t trace);
 uint8_t mux_read(uint16_t addr, uint32_t trace);
+
+void mux_set_read_ready(unsigned unit, unsigned trace);
+void mux_set_write_ready(unsigned unit, unsigned trace);
+
+void mux_poll_fds(struct MuxUnit* mux, unsigned trace);

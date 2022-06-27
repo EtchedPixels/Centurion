@@ -8,13 +8,12 @@
 #include "cpu6.h"
 #include "mux.h"
 
-static struct MuxUnit mux[NUM_MUX_UNITS];
+struct MuxUnit mux[NUM_MUX_UNITS];
  // 0 disables interrupts
  // LOAD writes 0 to F20A before transferring execution to a new binary
-static char rx_ipl_request = 0;
-static char tx_ipl_request = 0;
-static int irq_cause_unit = -1;
-static int irq_cause_reason = -1;
+static unsigned char rx_ipl_request = 0;
+static unsigned char tx_ipl_request = 0;
+static unsigned char irq_cause = 0;
 
 // Set the initial state for all out ports
 void mux_init(void)
@@ -24,11 +23,9 @@ void mux_init(void)
 	for (i = 0; i < NUM_MUX_UNITS; i++) {
 		mux[i].in_fd = -1;
 		mux[i].out_fd = -1;
-		mux[i].status = 0;
+		mux[i].status = MUX_TX_READY;
 		mux[i].lastc = 0xFF;
 		mux[i].baud = 9600;
-		mux[i].tx_finish_time = 0;
-		mux[i].rx_finish_time = 0;
 	}
 }
 
@@ -39,14 +36,6 @@ void mux_attach(unsigned unit, int in_fd, int out_fd)
 }
 
 /* Utility functions for the mux */
-static unsigned int check_write_ready(uint8_t unit)
-{
-	int fd = mux[unit].out_fd;
-
-	/* An unconnected port is always ready */
-	return (fd == -1 || tty_check_writable(fd)) ? MUX_TX_READY : 0;
-}
-
 static unsigned int next_char(uint8_t unit)
 {
 	int r;
@@ -83,52 +72,23 @@ static unsigned int next_char(uint8_t unit)
 	return c;
 }
 
-static void mux_assert_irq(unsigned unit, unsigned reason, unsigned trace)
+static int mux_assert_irq(unsigned unit, unsigned reason)
 {
 	char ipl = reason ? tx_ipl_request : rx_ipl_request;
+
 	if (!ipl)
-		return;
+		return 0;
 
-	if (irq_cause_reason != -1)
-		return; // Already pending interrupt
+	// Cause is actually the lower 8 bits of unit that caused the interrupt
+	// Though, TX interrupts have the lower bit set
+	irq_cause = (unit << 1) | reason;
+	cpu_assert_irq(ipl);
 
-	int raised = cpu_assert_irq(ipl);
-	if (raised) {
-		irq_cause_unit = unit;
-		irq_cause_reason = reason;
-
-		if (trace && reason == MUX_IRQ_RX)
-				fprintf(stderr, "MUX%i: RX IRQ raised\n", unit);
-
-		if (trace && reason == MUX_IRQ_TX)
-				fprintf(stderr, "MUX%i: TX IRQ raised\n", unit);
-	}
-
-}
-
-static void mux_ack_irq(unsigned unit, unsigned reason, unsigned trace) {
-	char ipl = reason ? tx_ipl_request : rx_ipl_request;
-	if (!ipl)
-		return;
-
-	if (irq_cause_reason == reason && irq_cause_unit == unit) {
-		irq_cause_unit = -1;
-		irq_cause_reason = -1;
-		cpu_deassert_irq(ipl);
-
-		if (trace && reason == MUX_IRQ_RX)
-			fprintf(stderr, "MUX%i: RX IRQ acknowledged\n", unit);
-
-		if (trace && reason == MUX_IRQ_TX)
-			fprintf(stderr, "MUX%i: TX IRQ acknowledged\n", unit);
-	}
+	return 1;
 }
 
 static void mux_unit_send(unsigned unit, uint8_t val) {
-	uint64_t symbol_len = 1000000000.0 / (float)mux[unit].baud;
-
 	mux[unit].status &= ~MUX_TX_READY;
-	mux[unit].tx_finish_time = get_current_time() + symbol_len * 10;
 
 	if (mux[unit].out_fd == -1) {
 		/* This MUX unit isn't connected to anything */
@@ -236,7 +196,7 @@ void mux_write(uint16_t addr, uint8_t val, uint32_t trace)
 		 * on the given unit. Before doing so, the output routine actually
 		 * waits for MUX_TX_READY bit to go high using a polled loop
 		 */
-		mux_assert_irq(val - 1, MUX_IRQ_TX, trace);
+		mux[val - 1].tx_done = 1;
 		return;
 	case 0xE: // Set TX interrupt request level
 		if (trace)
@@ -261,24 +221,32 @@ uint8_t mux_read(uint16_t addr, uint32_t trace)
 
 	// It seems that all mux units share the same cause register via chaining
 	if (addr == 0xf20f) {
-		if (irq_cause_unit == -1)
-			return 0;
-
-		card = irq_cause_unit / 4;
-		port = irq_cause_unit % 4;
-
-		// Cause is actually the lower 8 bits of unit that caused the interrupt
-		// Though, TX interrupts have the lower bit set
-		unsigned cause = (card << 4) | (port << 1) | irq_cause_reason;
-
 		if (trace)
-			fprintf(stderr, "MUX: InterruptCause Read: %02x\n", cause | 8);
+			fprintf(stderr, "MUX: InterruptCause Read: %02x\n",irq_cause);
 
-		// Reading this register is enough to clear the TX IRQ, but it seems
-		// to clear the RX IRQ, you actually have to read the data
-		mux_ack_irq(irq_cause_unit, MUX_IRQ_TX, trace);
+		/* Reading this registers acknowledges the currently pending IRQ.
+		 * For simplicity we consider both IRQ levels acknowledged. If the
+		 * handler has only cleared some of states, remaining IRQs will be
+		 * reasserted again from within mux_poll(). This way we are effectively
+		 * implementing a logical OR, which is present on a real hardware, because
+		 * both IRQs are normally programmed to the same IPL of 6
+		 */
+		if (tx_ipl_request)
+			cpu_deassert_irq(tx_ipl_request);
+		if (rx_ipl_request)
+			cpu_deassert_irq(rx_ipl_request);
 
-		return cause;
+		if (irq_cause & MUX_IRQ_TX) {
+			// Reading this register is enough to clear the TX IRQ, but it seems
+			// to clear the RX IRQ, you actually have to read the data
+			unsigned char unit = (irq_cause & MUX_UNIT_MASK) >> 1;
+		
+			mux[unit].tx_done = 0;
+			if (trace)
+				fprintf(stderr, "MUX%i: TX IRQ acknowledged\n", unit);
+		}
+
+		return irq_cause;
 	}
 
 	// Decode address
@@ -309,7 +277,7 @@ uint8_t mux_read(uint16_t addr, uint32_t trace)
 	{
 	case 0x0: // Status register
 		// Force CTS on
-		data = mux[unit].status | check_write_ready(unit) | MUX_CTS;
+		data = mux[unit].status | MUX_CTS;
 		if (trace)
 			fprintf(stderr, "MUX%i: Status Read = %02x\n", unit, data);
 
@@ -318,7 +286,6 @@ uint8_t mux_read(uint16_t addr, uint32_t trace)
 		// Data register
 		data = next_char(port);
 		mux[unit].status &= ~MUX_RX_READY;
-		mux_ack_irq(unit, MUX_IRQ_RX, trace);
 		if (trace)
 			fprintf(stderr, "MUX%i: Data Read = %02x ('%c')\n", unit, data, data);
 		break;
@@ -330,102 +297,53 @@ uint8_t mux_read(uint16_t addr, uint32_t trace)
 	return data;
 }
 
-static void set_read_ready(unsigned unit, unsigned trace)
+void mux_set_read_ready(unsigned unit, unsigned trace)
 {
-	if ((mux[unit].status & MUX_RX_READY) == 0) {
-		if (trace)
-			fprintf(stderr, "MUX%i: Ready\n", unit);
-		mux[unit].rx_finish_time = get_current_time() + (1000000000 / 30);
-	}
+	if (trace && !(mux[unit].status |= MUX_RX_READY))
+		fprintf(stderr, "MUX%i: RX_READY raised\n", unit);
 	mux[unit].status |= MUX_RX_READY;
 }
 
-static void set_write_ready(unsigned unit, unsigned trace)
+void mux_set_write_ready(unsigned unit, unsigned trace)
 {
-	mux[unit].status |= MUX_TX_READY;
-	mux[unit].tx_finish_time = 0;
-	mux_assert_irq(unit, MUX_IRQ_TX, trace);
-}
-
-static void check_tx_done(unsigned trace) {
-	uint64_t time = get_current_time();
-	for (unsigned unit = 0; unit < NUM_MUX_UNITS; unit++) {
-		uint64_t finish = mux[unit].tx_finish_time;
-		if (finish && finish <= time) {
-			set_write_ready(unit, trace);
-		}
-	}
-}
-
-#ifdef WIN32
-
-void mux_poll(unsigned trace)
-{
-	int unit;
-
-	check_tx_done(trace);
-
-	for (unit = 0; unit < NUM_MUX_UNITS; unit++) {
-		if (mux[unit].status & MUX_RX_READY) {
-			/* Do not waste time repetitively polling ports,
-			 * which we know are ready
-			 */
-			mux_assert_irq(unit, MUX_IRQ_RX, trace);
-			continue;
-		}
-		int fd = mux[unit].in_fd;
-
-	    	if (fd != -1 && tty_check_readable(fd)) {
-			set_read_ready(unit, trace);
-		}
-	}
-}
-
-#else
-
-void mux_poll(unsigned trace)
-{
-	fd_set i;
-	int max_fd = 0;
-	int unit;
-
-	check_tx_done(trace);
-
-	FD_ZERO(&i);
-
-	uint64_t time = get_current_time();
-
-	for (unit = 0; unit < NUM_MUX_UNITS; unit++) {
-		if (mux[unit].status & MUX_RX_READY) {
-			/* Do not waste time repetitively polling ports,
-			 * which we know are ready. But keep re-asserting the IRQ
-			 * if configured
-			 */
-			mux_assert_irq(unit, MUX_IRQ_RX, trace);
-			continue;
-		}
-		if (mux[unit].rx_finish_time > time) {
-			// Block until the character has finished receiving
-			continue;
-		}
-		int fd = mux[unit].in_fd;
-	    	if (fd == -1)
-			continue;
-	    	FD_SET(fd, &i);
-	    	if (fd >= max_fd)
-	    		max_fd = fd + 1;
-	}
-
-	if (max_fd == 0 || select_wrapper(max_fd, &i, NULL) == -1) {
+	if (mux[unit].status & MUX_TX_READY)
 		return;
-	}
-
-	for (unit = 0; unit < NUM_MUX_UNITS; unit++) {
-		int fd = mux[unit].in_fd;
-
-		if (fd != -1 && FD_ISSET(fd, &i))
-			set_read_ready(unit, trace);
-	}
+	/* If a TX done interrupt is requested, it will be raised when the UART
+	 * switches from BUSY to READY state. The UART spends in READY state most
+	 * of the time, but the interrupt will eventually be acknowledged and
+	 * deasserted, so we store it as a separate status bit. On real HW it is
+	 * perhaps a part of the status register, but we don't know which one,
+	 * we haven't found any reads, so for now we keep it completely separate.
+	 */
+	if (tx_ipl_request)
+		mux[unit].tx_done = 1;
+	if (trace)
+		fprintf(stderr, "MUX%i: TX_READY raised; TX_DONE = %d\n", unit, mux[unit].tx_done);
+	mux[unit].status |= MUX_TX_READY;
 }
 
-#endif
+void mux_poll(unsigned trace)
+{
+	unsigned char old_cause = irq_cause;
+	int unit;
+
+	/* This updates RX_READY and TX_READY flags, system-dependent */
+	mux_poll_fds(mux, trace);
+
+	/*
+	 * Updates current IRQ state and chooses current irq_cause register value according to
+	 * unit interrupt priorities. Each unit has two interrupts: RX and TX, and we enumerate
+	 * them in order, starting from 0: RX0, TX0, RX1, TX1, etc. We consider the lowest
+	 * number to have the highest priority, we aren't sure whether the real hardware
+	 * does the same, but it's easy to reverse, if needed, by removing break statements.
+	 */
+	for (unit = 0; unit < NUM_MUX_UNITS; unit++) {
+		if (mux[unit].status & MUX_RX_READY && mux_assert_irq(unit, MUX_IRQ_RX))
+			break;
+		if (mux[unit].tx_done && mux_assert_irq(unit, MUX_IRQ_TX))
+			break;
+	}
+
+	if (trace && old_cause != irq_cause)
+		fprintf(stderr, "MUX IRQ cause changed to %02X\n", irq_cause);
+}

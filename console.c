@@ -81,19 +81,7 @@ void net_init(unsigned short port)
         mux_attach(0, io_fd, io_fd);
 }
 
-unsigned int tty_check_writable(int fd)
-{
-	fd_set o;
-
-	FD_ZERO(&o);
-	FD_SET(fd, &o);
-	if (select_wrapper(fd + 1, NULL, &o) == -1) {
-		return 0;
-	}
-	return FD_ISSET(fd, &o);
-}
-
-int select_wrapper(int maxfd, fd_set* i, fd_set* o)
+static int select_wrapper(int maxfd, fd_set* i, fd_set* o)
 {
 	struct timeval tv;
 	int rc;
@@ -107,4 +95,51 @@ int select_wrapper(int maxfd, fd_set* i, fd_set* o)
 		exit(1);
 	}
 	return rc;
+}
+
+void mux_poll_fds(struct MuxUnit* mux, unsigned trace)
+{
+	fd_set i, o;
+	int max_fd = 0;
+	int unit;
+
+	FD_ZERO(&i);
+	FD_ZERO(&o);
+
+	for (unit = 0; unit < NUM_MUX_UNITS; unit++) {
+		int ifd = mux[unit].in_fd;
+		int ofd = mux[unit].out_fd;
+
+		/* Do not waste time repetitively polling ports,
+		 * which we know are ready.
+		 */
+		if (!(ifd == -1 || mux[unit].status & MUX_RX_READY)) {
+			FD_SET(ifd, &i);
+			if (ifd >= max_fd)
+				max_fd = ifd + 1;
+		}
+		if (!(ofd == -1 || mux[unit].status & MUX_TX_READY)) {
+			FD_SET(ofd, &o);
+			if (ofd >= max_fd)
+				max_fd = ofd + 1;
+		}
+	}
+
+	if (max_fd > 0) {
+	 	if (select_wrapper(max_fd, &i, &o) == -1)
+			return;
+	}
+
+	for (unit = 0; unit < NUM_MUX_UNITS; unit++) {
+		int ifd = mux[unit].in_fd;
+		int ofd = mux[unit].out_fd;
+
+		if (ifd != -1 && FD_ISSET(ifd, &i))
+			mux_set_read_ready(unit, trace);
+		/* Unconnected ports still send their data to nowhere,
+		 * (imagine an unplugged connector), so they still becone READY
+		 */
+		if (ofd == -1 || FD_ISSET(ofd, &o))
+			mux_set_write_ready(unit, trace);
+	}
 }
