@@ -153,7 +153,7 @@ void mux_write(uint16_t addr, uint8_t val, uint32_t trace)
 	card = (addr >> 4) & 0xF;
 
 	mode = addr & 0xf;
-	if (mode > 8) {
+	if (mode > 7) {
 		port = 0;
 		unit = card * 4;
 	} else {
@@ -203,6 +203,7 @@ void mux_write(uint16_t addr, uint8_t val, uint32_t trace)
 			fprintf(stderr, "MUX%i: TX level = %i\n", unit, val);
 		tx_ipl_request = val;
 		return;
+	case 8:
 	case 0xB:
 		// Written by CRT driver
 		if (!trace)
