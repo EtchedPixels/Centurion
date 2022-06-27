@@ -551,9 +551,9 @@ static int bignum_op() {
 		char buffer[32];
 
 		if (base == 10) {
-			snprintf(buffer, sizeof(buffer), "%lu", num);
+			snprintf(buffer, sizeof(buffer), "%llu", num);
 		} else if (base == 16) {
-			snprintf(buffer, sizeof(buffer), "%lX", num);
+			snprintf(buffer, sizeof(buffer), "%llX", num);
 		} else {
 			fprintf(stderr, "baseconv, unsupported base %i\n", base);
 			exit(1);

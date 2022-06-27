@@ -112,15 +112,16 @@ The following options can be used when running the emulator:
 
 The system trace outputs system IO to the terminal; useful for debugging. The `-t` option takes a value that is a [bitmask](https://en.wikipedia.org/wiki/Mask_(computing)) of the following:
 
-- `1`: Memory
-- `2`: Registers
-- `4`: CPU
-- `8`: FDC
-- `16`: CMD
+- `1`: Memory read
+- `2`: Memory write
+- `4`: Registers
+- `8`: CPU
+- `16`: FDC
+- `32`: CMD
 
-For example, in order to trace both *memory* and *registers*, set `-t 3`.
+For example, in order to trace both *memory* and *registers*, set `-t 7`.
 
 ## Halting the emulator
 
-To halt the emulator, simply press `Ctrl-\`, which will land you back on your terminal prompt.
+To halt the emulator, simply press `Ctrl-\` (on Unix) or `Ctrl-Z` (on Windows), which will land you back on your terminal prompt.
 
