@@ -575,8 +575,9 @@ static int bignum_op(void) {
 	unsigned mode = fetch();
 
 	if ((mode >> 4) == 9) {
-		// BASECONV
-		// I have not idea how the actual microcode routine works, so here is an approximation
+		// bignum to Ascii
+		// I have no idea how the actual microcode routine works, so here is an approximation
+		// that works upto 64bits
 		// Doesn't handle cases where buffer hasn't been memset to 0xc0
 		unsigned dest_width = reg_read(AL);
 		unsigned base = a_size + 1;
@@ -613,6 +614,8 @@ static int bignum_op(void) {
 			return 0;
 		}
 
+		alu_out = 0;
+
 		for (int i=0; i<actual_width; i++) {
 			mmu_mem_write8(dst_addr+i, buffer[i] | 0x80);
 		}
@@ -621,6 +624,49 @@ static int bignum_op(void) {
 		regpair_write(A, dst_addr + actual_width);
 		return 0;
 	}
+	if ((mode >> 4) == 8) {
+		// ASCII to bignum
+		// I'm not sure how the actual microcode routine works, so here is an approximation
+		// that works upto 64 bits.
+		unsigned src_width = reg_read(AL);
+
+		if (b_size > 8 || src_width > 31) {
+			fprintf(stderr, "%i byte ascii-to-bignum is too big for our modern 64bit machines\n", b_size);
+			exit(1);
+		}
+
+		uint16_t src_addr = get_twobit(mode, 0, src_width);
+		uint16_t dst_addr = get_twobit(mode, 1, b_size);
+
+		// Copy string out
+		char buffer[32];
+		for (int i=0; i < src_width; i++) {
+			buffer[i] = mmu_mem_read8(src_addr+i) & 0x7f;
+		}
+		buffer[src_width] = '\0';
+
+		char* end_ptr = &buffer[src_width];
+		uint64_t result = strtol(buffer, &end_ptr, a_size + 1);
+
+		if (end_ptr == NULL) {
+			alu_out = ALU_F;
+			return 0;
+		}
+		alu_out = 0;
+
+		// Guessing that this might set some flags?
+		if (result == 0)
+			alu_out |= ALU_V;
+		if (((int64_t)result) < 0)
+			alu_out |= ALU_M;
+
+		for (int i = b_size; i != 0; --i) {
+			mmu_mem_write8(dst_addr + i, result & 0xff);
+			result >>= 8;
+		}
+		return 0;
+	}
+
 
 	switch (mode >> 4) {
 	default:
