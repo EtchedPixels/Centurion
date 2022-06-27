@@ -465,6 +465,20 @@ static int block_op(int inst)
 			mmu_mem_write8(da++, mmu_mem_read8(sa++));
 		};
 		return 0;
+	case 0x60:
+		// Complete Guess, but this might be OR
+		while(dst_len--) {
+			uint8_t val = mmu_mem_read8(da++) | mmu_mem_read8(sa++);
+			mmu_mem_write8(da, val);
+		};
+		return 0;
+	case 0x70:
+		// Complete Guess, but this might be AND
+		while(dst_len--) {
+			uint8_t val = mmu_mem_read8(da++) & mmu_mem_read8(sa++);
+			mmu_mem_write8(da, val);
+		};
+		return 0;
 	case 0x80:
 		alu_out |= ALU_V;
 		while (dst_len--) {
@@ -1636,6 +1650,11 @@ static int storeword_op(void)
 	return 0;
 }
 
+// opsys ALWAYS uses this instruction for accessing MMIO.
+// It might do something special on the bus, or with page-tables
+//
+// If index register is odd, does a store, otherwise does a load
+// If destination register is odd, does an 8 bit operation, otherwise 16bit
 static int cpu6_indexed_loadstore(void)
 {
 	uint8_t regs = fetch();
@@ -1643,11 +1662,19 @@ static int cpu6_indexed_loadstore(void)
 	uint8_t reg = regs >> 4;
 	uint16_t addr = regpair_read(regs & 0x0e) + offset;
 
-	if (regs & 1) {
-		mmu_mem_write8(addr, reg_read(reg));
-	} else {
+	switch (regs & 0x11) {
+	case 0x00: // 16 bit load
+		regpair_write(reg, mmu_mem_read16(addr));
+		break;
+	case 0x01: // 16 bit store
+		mmu_mem_write16(addr, regpair_read(reg));
+		break;
+	case 0x10: // 8 bit load
 		reg_write(reg, mmu_mem_read8(addr));
+	case 0x11: // 8 bit store
+		mmu_mem_write8(addr, reg_read(reg));
 	}
+
 	ldflags(reg);
 	return 0;
 }
