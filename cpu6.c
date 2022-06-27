@@ -557,7 +557,7 @@ static int bignum_op() {
 
 
 		// Convert to little endian
-		uint64_t num = 0;
+		unsigned long long num = 0;
 		for (int i=0; i < b_size; i++) {
 			num = num << 8 | mmu_mem_read8(src_addr+i);
 		}
