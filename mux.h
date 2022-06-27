@@ -9,7 +9,9 @@ struct MuxUnit
         int out_fd;
         unsigned char status;
         unsigned char lastc;
+        int baud;
         uint64_t tx_finish_time;
+        uint64_t rx_finish_time;
 };
 
 /* Status register bits */
@@ -25,7 +27,7 @@ void mux_init(void);
 void mux_attach(unsigned unit, int in_fd, int out_fd);
 void tty_init(void);
 void net_init(unsigned short port);
-void mux_poll(void);
+void mux_poll(unsigned trace);
 
 void mux_write(uint16_t addr, uint8_t val, uint32_t trace);
 uint8_t mux_read(uint16_t addr, uint32_t trace);

@@ -32,7 +32,7 @@ static uint8_t alu_out;
 static uint8_t switches = 0xF0;
 static uint8_t int_enable;
 static unsigned halted;
-static unsigned pending_ipl;
+static unsigned pending_ipl = 0;
 
 #define BS1	0x01
 #define BS2	0x02
@@ -463,6 +463,20 @@ static int block_op(int inst)
 	case 0x40:
 		while(dst_len--) {
 			mmu_mem_write8(da++, mmu_mem_read8(sa++));
+		};
+		return 0;
+	case 0x60:
+		// Complete Guess, but this might be OR
+		while(dst_len--) {
+			uint8_t val = mmu_mem_read8(da++) | mmu_mem_read8(sa++);
+			mmu_mem_write8(da, val);
+		};
+		return 0;
+	case 0x70:
+		// Complete Guess, but this might be AND
+		while(dst_len--) {
+			uint8_t val = mmu_mem_read8(da++) & mmu_mem_read8(sa++);
+			mmu_mem_write8(da, val);
 		};
 		return 0;
 	case 0x80:
@@ -1636,6 +1650,11 @@ static int storeword_op(void)
 	return 0;
 }
 
+// opsys ALWAYS uses this instruction for accessing MMIO.
+// It might do something special on the bus, or with page-tables
+//
+// If index register is odd, does a store, otherwise does a load
+// If destination register is odd, does an 8 bit operation, otherwise 16bit
 static int cpu6_indexed_loadstore(void)
 {
 	uint8_t regs = fetch();
@@ -1643,11 +1662,21 @@ static int cpu6_indexed_loadstore(void)
 	uint8_t reg = regs >> 4;
 	uint16_t addr = regpair_read(regs & 0x0e) + offset;
 
-	if (regs & 1) {
-		mmu_mem_write8(addr, reg_read(reg));
-	} else {
+	switch (regs & 0x11) {
+	case 0x00: // 16 bit load
+		regpair_write(reg, mmu_mem_read16(addr));
+		break;
+	case 0x01: // 16 bit store
+		mmu_mem_write16(addr, regpair_read(reg));
+		break;
+	case 0x10: // 8 bit load
 		reg_write(reg, mmu_mem_read8(addr));
+		break;
+	case 0x11: // 8 bit store
+		mmu_mem_write8(addr, reg_read(reg));
+		break;
 	}
+
 	ldflags(reg);
 	return 0;
 }
@@ -2021,19 +2050,17 @@ void cpu6_interrupt(unsigned trace)
 	}
 }
 
-/*
- * This is an utter crappy hack; in real life multiple IRQs
- * may be asserted at the same time, so we need to choose an
- * appropriate pending IPL and manage our state accordingly,
- * but this will do for now, when we only have one MUX generating
- * a single IRQ.
- */
-void cpu_assert_irq(unsigned ipl) {
+// Not quite accurate to real hardware, but hopefully close enough
+int cpu_assert_irq(unsigned ipl) {
+	if (pending_ipl == ipl || pending_ipl > ipl)
+		return 0;
 	pending_ipl = ipl;
+	return 1;
 }
 
 void cpu_deassert_irq(unsigned ipl) {
-	pending_ipl = 0;
+	if (pending_ipl == ipl)
+		pending_ipl = 0;
 }
 
 unsigned cpu6_execute_one(unsigned trace)

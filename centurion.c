@@ -944,7 +944,7 @@ int main(int argc, char *argv[])
 				cmd_dma_cmd_out_done();
 		}
 		/* Update peripherals state */
-		mux_poll();
+		mux_poll(trace & TRACE_MUX);
 
 		instruction_count++;
 		if (terminate_at && instruction_count >= terminate_at) {
