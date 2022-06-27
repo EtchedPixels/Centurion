@@ -32,7 +32,7 @@ static uint8_t alu_out;
 static uint8_t switches = 0xF0;
 static uint8_t int_enable;
 static unsigned halted;
-static unsigned pending_ipl = 0;
+static unsigned pending_ipl_mask = 0;
 
 #define BS1	0x01
 #define BS2	0x02
@@ -2031,9 +2031,13 @@ static char *flagcode(void)
 void cpu6_interrupt(unsigned trace)
 {
 	unsigned old_ipl;
+	unsigned pending_ipl;
 
 	if (int_enable == 0)
 		return;
+
+	pending_ipl = pending_ipl_mask == 0 ? 0 : 31 - __builtin_clz(pending_ipl_mask);
+
 	if (pending_ipl > cpu_ipl) {
 		old_ipl = cpu_ipl;
 		halted = 0;
@@ -2051,16 +2055,12 @@ void cpu6_interrupt(unsigned trace)
 }
 
 // Not quite accurate to real hardware, but hopefully close enough
-int cpu_assert_irq(unsigned ipl) {
-	if (pending_ipl == ipl || pending_ipl > ipl)
-		return 0;
-	pending_ipl = ipl;
-	return 1;
+void cpu_assert_irq(unsigned ipl) {
+	pending_ipl_mask |= 1 << ipl;
 }
 
 void cpu_deassert_irq(unsigned ipl) {
-	if (pending_ipl == ipl)
-		pending_ipl = 0;
+	pending_ipl_mask &= ~(1 << ipl);
 }
 
 unsigned cpu6_execute_one(unsigned trace)
