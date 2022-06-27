@@ -243,10 +243,6 @@ void mux_write(uint16_t addr, uint8_t val, uint32_t trace)
 			fprintf(stderr, "MUX%i: TX level = %i\n", unit, val);
 		tx_ipl_request = val;
 		return;
-	case 0xF:
-		// acknowledges the interrupt
-		mux_ack_irq(unit, val, trace);
-		return;
 	case 0xB:
 		// Written by CRT driver
 		if (!trace)
@@ -265,6 +261,9 @@ uint8_t mux_read(uint16_t addr, uint32_t trace)
 
 	// It seems that all mux units share the same cause register via chaining
 	if (addr == 0xf20f) {
+		if (irq_cause_unit == -1)
+			return 0;
+
 		card = irq_cause_unit / 4;
 		port = irq_cause_unit % 4;
 
@@ -274,6 +273,10 @@ uint8_t mux_read(uint16_t addr, uint32_t trace)
 
 		if (trace)
 			fprintf(stderr, "MUX: InterruptCause Read: %02x\n", cause | 8);
+
+		// Reading this register is enough to clear the TX IRQ, but it seems
+		// to clear the RX IRQ, you actually have to read the data
+		mux_ack_irq(irq_cause_unit, MUX_IRQ_TX, trace);
 
 		return cause;
 	}

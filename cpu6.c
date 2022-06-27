@@ -1671,8 +1671,10 @@ static int cpu6_indexed_loadstore(void)
 		break;
 	case 0x10: // 8 bit load
 		reg_write(reg, mmu_mem_read8(addr));
+		break;
 	case 0x11: // 8 bit store
 		mmu_mem_write8(addr, reg_read(reg));
+		break;
 	}
 
 	ldflags(reg);
