@@ -118,6 +118,8 @@ The system trace outputs system IO to the terminal; useful for debugging. The `-
 - `8`: CPU
 - `16`: FDC
 - `32`: CMD
+- `64`: Parity
+- `128` : MUX
 
 For example, in order to trace both *memory* and *registers*, set `-t 7`.
 

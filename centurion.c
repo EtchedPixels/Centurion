@@ -853,8 +853,8 @@ int main(int argc, char *argv[])
 {
 	int opt;
 	unsigned port = 0;
-	int64_t terminate_at = 0;
-	int64_t instruction_count = 0;
+	long long terminate_at = 0;
+	long long instruction_count = 0;
 
 	mux_init();
 

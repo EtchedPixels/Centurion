@@ -363,14 +363,14 @@ void mux_poll(unsigned trace)
 {
 	int unit;
 
-	check_tx_done();
+	check_tx_done(trace);
 
 	for (unit = 0; unit < NUM_MUX_UNITS; unit++) {
 		if (mux[unit].status & MUX_RX_READY) {
 			/* Do not waste time repetitively polling ports,
 			 * which we know are ready
 			 */
-			mux_assert_irq(unit, MUX_IRQ_RX);
+			mux_assert_irq(unit, MUX_IRQ_RX, trace);
 			continue;
 		}
 		int fd = mux[unit].in_fd;
