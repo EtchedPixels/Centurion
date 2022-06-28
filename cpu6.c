@@ -718,7 +718,7 @@ static int bignum_op(void) {
 		if (((int64_t)result) < 0)
 			alu_out |= ALU_M;
 
-		for (int i = b_size; i != 0; --i) {
+		for (int i = b_size-1; i >= 0; i--) {
 			mmu_mem_write8(dst_addr + i, result & 0xff);
 			result >>= 8;
 		}
