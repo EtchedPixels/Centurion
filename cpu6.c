@@ -450,16 +450,49 @@ static int block_op(int inst)
 	unsigned dst_len = block_op_getLen(inst, op) + 1;
 	unsigned src_len = dst_len;
 	uint16_t sa, da;
-	uint8_t fill;
+	uint8_t chr;
+
+	// clear the fault flag
+	alu_out &= ~ALU_F;
 
 	// memset only reads the source once
 	if ((op & 0xF0) == 0x90)
 		src_len = 1;
 
+	// memchr takes an extra "chr" operand
+	if ((op & 0xF0) == 0x20) {
+		if (inst == 0x47) {
+			chr = fetch();
+		} else {
+			// This gets it's chr from somewhere else. Probally a register?
+			fprintf(stderr, "Unsupported 67 2x memchr at %x\n", exec_pc);
+			exit(-1);
+		}
+	}
+
 	sa = get_twobit(am, 0, src_len);
 	da = get_twobit(am, 1, dst_len);
 
 	switch(op & 0xF0) {
+	case 0x20:
+		// copies bytes from src to dst, stopping if a byte matches chr
+		// appears to be combined memcpy/memchr/strcpy
+		// It's possible it might also stop when chr is 0, which would
+		// change it's behavior to a combined strcpy/strchr/strlen
+		while(dst_len--) {
+			uint8_t val = mmu_mem_read8(sa);
+			mmu_mem_write8(da, val);
+			if (val == chr) { // Match
+				regpair_write(Y, sa);
+				regpair_write(Z, da);
+				return 0;
+			}
+			sa++;
+			da++;
+		};
+		// No match
+		alu_out |= ALU_F;
+		return 0;
 	case 0x40:
 		while(dst_len--) {
 			mmu_mem_write8(da++, mmu_mem_read8(sa++));
@@ -490,9 +523,9 @@ static int block_op(int inst)
 		}
 		return 0;
 	case 0x90:
-		fill = mmu_mem_read8(sa);
+		uint8_t val = mmu_mem_read8(sa);
 		while (dst_len--) {
-			mmu_mem_write8(da++, fill);
+			mmu_mem_write8(da++, val);
 		}
 		return 0;
 	default:
