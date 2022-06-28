@@ -98,7 +98,6 @@ void mux_poll_fds(struct MuxUnit* mux, unsigned trace)
 
 	for (unit = 0; unit < NUM_MUX_UNITS; unit++) {
 		int ifd = mux[unit].in_fd;
-		int ofd = mux[unit].out_fd;
 
 		/* Do not waste time repetitively polling ports,
 		 * which we know are ready.
@@ -106,12 +105,6 @@ void mux_poll_fds(struct MuxUnit* mux, unsigned trace)
 		if (!(ifd == -1 || mux[unit].status & MUX_RX_READY)) {
                         if (tty_check_readable(ifd))
                                 mux_set_read_ready(unit, trace);
-		}
-                if (ofd == -1) {
-                        mux_set_write_ready(unit, trace);
-                } else if (!(mux[unit].status & MUX_TX_READY)) {
-                        if (tty_check_writable(ofd))
-                                mux_set_write_ready(unit, trace);
 		}
 	}
 }

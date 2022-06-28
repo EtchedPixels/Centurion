@@ -108,20 +108,14 @@ void mux_poll_fds(struct MuxUnit* mux, unsigned trace)
 
 	for (unit = 0; unit < NUM_MUX_UNITS; unit++) {
 		int ifd = mux[unit].in_fd;
-		int ofd = mux[unit].out_fd;
 
 		/* Do not waste time repetitively polling ports,
 		 * which we know are ready.
 		 */
-		if (!(ifd == -1 || mux[unit].status & MUX_RX_READY)) {
+		if (!(ifd == -1 || mux[unit].status & MUX_RX_READY || mux[unit].rx_ready_time)) {
 			FD_SET(ifd, &i);
 			if (ifd >= max_fd)
 				max_fd = ifd + 1;
-		}
-		if (!(ofd == -1 || mux[unit].status & MUX_TX_READY)) {
-			FD_SET(ofd, &o);
-			if (ofd >= max_fd)
-				max_fd = ofd + 1;
 		}
 	}
 
@@ -132,14 +126,8 @@ void mux_poll_fds(struct MuxUnit* mux, unsigned trace)
 
 	for (unit = 0; unit < NUM_MUX_UNITS; unit++) {
 		int ifd = mux[unit].in_fd;
-		int ofd = mux[unit].out_fd;
 
 		if (ifd != -1 && FD_ISSET(ifd, &i))
 			mux_set_read_ready(unit, trace);
-		/* Unconnected ports still send their data to nowhere,
-		 * (imagine an unplugged connector), so they still becone READY
-		 */
-		if (ofd == -1 || FD_ISSET(ofd, &o))
-			mux_set_write_ready(unit, trace);
 	}
 }
