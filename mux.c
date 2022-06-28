@@ -15,6 +15,7 @@ struct MuxUnit mux[NUM_MUX_UNITS];
 static unsigned char rx_ipl_request = 0;
 static unsigned char tx_ipl_request = 0;
 static int irq_cause = -1;
+static uint32_t poll_count = 0;
 
 // Set the initial state for all out ports
 void mux_init(void)
@@ -314,6 +315,7 @@ void mux_process_events(unsigned unit, unsigned trace) {
 	if (mux[unit].rx_ready_time && mux[unit].rx_ready_time <= time) {
 		mux[unit].rx_ready_time = 0;
 		mux[unit].status |= MUX_RX_READY;
+		poll_count = 0;
 
 		if (trace)
 			fprintf(stderr, "MUX%i: RX_READY\n", unit);
@@ -345,8 +347,9 @@ void mux_poll(unsigned trace)
 	for (unit = 0; unit < NUM_MUX_UNITS; unit++)
 		mux_process_events(unit, trace);
 
-	/* This updates RX_READY and TX_READY flags, system-dependent */
-	mux_poll_fds(mux, trace);
+	// Cheap speedhack, only check FDs sometimes
+	if ((poll_count++ & 0xF) == 0)
+		mux_poll_fds(mux, trace);
 
 	cpu_deassert_irq(rx_ipl_request);
 	cpu_deassert_irq(tx_ipl_request);
