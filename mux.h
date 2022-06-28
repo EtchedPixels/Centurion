@@ -11,6 +11,8 @@ struct MuxUnit
         unsigned char lastc;
         int baud;
         unsigned char tx_done;
+        uint64_t rx_ready_time;
+        uint64_t tx_done_time;
 };
 
 /* Status register bits */
@@ -31,6 +33,5 @@ void mux_write(uint16_t addr, uint8_t val, uint32_t trace);
 uint8_t mux_read(uint16_t addr, uint32_t trace);
 
 void mux_set_read_ready(unsigned unit, unsigned trace);
-void mux_set_write_ready(unsigned unit, unsigned trace);
 
 void mux_poll_fds(struct MuxUnit* mux, unsigned trace);
