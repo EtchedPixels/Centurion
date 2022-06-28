@@ -289,7 +289,7 @@ void disassemble(unsigned op)
 		return;
 	}
 	if (op < 0x46) {
-		uint8_t v = mmu_mem_read8(rpc);
+		uint8_t v = mmu_mem_read8_debug(rpc);
 		fprintf(stderr, "%sB %s, %s\n", alu2name[op & 7],
 			r8name(v >> 4), r8name(v));
 		return;
@@ -305,7 +305,7 @@ void disassemble(unsigned op)
 	}
 	/* 4E 4F mystery */
 	if (op < 0x56) {
-		uint8_t v = mmu_mem_read8(rpc);
+		uint8_t v = mmu_mem_read8_debug(rpc);
 		uint8_t f = v & 0x11;
 		v &= 0xEE;
 		switch(f) {

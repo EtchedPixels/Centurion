@@ -450,16 +450,49 @@ static int block_op(int inst)
 	unsigned dst_len = block_op_getLen(inst, op) + 1;
 	unsigned src_len = dst_len;
 	uint16_t sa, da;
-	uint8_t fill;
+	uint8_t chr;
+
+	// clear the fault flag
+	alu_out &= ~ALU_F;
 
 	// memset only reads the source once
 	if ((op & 0xF0) == 0x90)
 		src_len = 1;
 
+	// memchr takes an extra "chr" operand
+	if ((op & 0xF0) == 0x20) {
+		if (inst == 0x47) {
+			chr = fetch();
+		} else {
+			// This gets it's chr from somewhere else. Probally a register?
+			fprintf(stderr, "Unsupported 67 2x memchr at %x\n", exec_pc);
+			exit(-1);
+		}
+	}
+
 	sa = get_twobit(am, 0, src_len);
 	da = get_twobit(am, 1, dst_len);
 
 	switch(op & 0xF0) {
+	case 0x20:
+		// copies bytes from src to dst, stopping if a byte matches chr
+		// appears to be combined memcpy/memchr/strcpy
+		// It's possible it might also stop when chr is 0, which would
+		// change it's behavior to a combined strcpy/strchr/strlen
+		while(dst_len--) {
+			uint8_t val = mmu_mem_read8(sa);
+			mmu_mem_write8(da, val);
+			if (val == chr) { // Match
+				regpair_write(Y, sa);
+				regpair_write(Z, da);
+				return 0;
+			}
+			sa++;
+			da++;
+		};
+		// No match
+		alu_out |= ALU_F;
+		return 0;
 	case 0x40:
 		while(dst_len--) {
 			mmu_mem_write8(da++, mmu_mem_read8(sa++));
@@ -490,9 +523,9 @@ static int block_op(int inst)
 		}
 		return 0;
 	case 0x90:
-		fill = mmu_mem_read8(sa);
+		uint8_t val = mmu_mem_read8(sa);
 		while (dst_len--) {
-			mmu_mem_write8(da++, fill);
+			mmu_mem_write8(da++, val);
 		}
 		return 0;
 	default:
@@ -1328,18 +1361,49 @@ static int branch_op(void)
 	return 9;
 }
 
-/* Some of this is not clear */
-static void reactivate_pri(void)
+#define SWITCH_IPL_RETURN  1
+#define SWITCH_IPL_RETURN_MODIFIED 2
+#define SWITCH_IPL_INTERRUPT 3
+
+static void switch_ipl(unsigned new_ipl, unsigned mode)
 {
-	/* Save flags */
-	uint16_t c = regpair_read(C);
-	c &= 0x0F;
-	c |= alu_out;
-	regpair_write(C, c);
-	/* Saved IPL */
-	cpu_ipl = (c >> 8) & 0x0F;
+	/*  C register layout:
+	 *
+	 *  15-12   Previous IPL
+	 *  11-8    Unknown, not used?
+	 *  7       Value (Zero)
+	 *  6       Minus (Sign)
+	 *  5       Fault (Overflow)
+	 *  4       Link (Carry)
+	 *  3-0     Memory MAP aka MMU aka Page Table Base
+	 */
+
+	unsigned old_ipl = cpu_ipl;
+	if (mode != SWITCH_IPL_RETURN_MODIFIED) {
+		// Save pc
+		regpair_write(P, pc);
+
+		// Save flags and MAP
+		reg_write(CL, alu_out | cpu_mmu);
+	}
+	cpu_ipl = new_ipl;
+
+	// We are now on the new level
+
+	// restore pc
 	pc = regpair_read(P);
-	alu_out = regpair_read(C) & 0x0F;
+
+	if (mode == SWITCH_IPL_INTERRUPT) {
+		// Save previous IPL, so we can return later
+		reg_write(CH, old_ipl << 4);
+	}
+
+	uint8_t cl = reg_read(CL);
+	// Restore flags
+	alu_out = cl & (ALU_L | ALU_F | ALU_M | ALU_V);
+
+	// Restore memory MAP
+	cpu_mmu = cl & 0x7;
 }
 
 /* Low operations - not all known */
@@ -1379,9 +1443,10 @@ static int low_op(void)
 	case 0x0A:		/* RI   Return from interrupt */
 		/* This may differ a bit on the CPU6 seems to have a carry
 		   involvement */
-		regpair_write(P, pc);
+		switch_ipl(reg_read(CH) >> 4, SWITCH_IPL_RETURN);
+		break;
 	case 0x0B:		/* RIM  Return from interrupt modified */
-		reactivate_pri();
+		switch_ipl(reg_read(CH) >> 4, SWITCH_IPL_RETURN_MODIFIED);
 		break;
 	case 0x0C:
 		/* EE200 historical ? - enable link to teletype */
@@ -1707,6 +1772,41 @@ static int cpu6_il_mov(void)
 		cpu6_il_loadbyte(ipl, (r | 1) ^ 1, AH);
 		cpu6_il_loadbyte(ipl, r ^ 1, AL);
 
+	}
+	return 0;
+}
+
+// 16bit store instruction.
+// With address modes for:
+//   - reg to reg
+//   - (direct)
+//   - immediate
+//   - indexed (with 16bit displacement)
+static int store16() {
+	uint16_t addr;
+	uint8_t regs = fetch();
+	unsigned dst_reg = (regs >> 4) & 0xe;
+	uint16_t value = regpair_read(regs & 0xe);
+
+	ldflags16(value); // Flags
+
+	switch(regs & 0x11) {
+	case 0x00: // dst_reg <- src_reg
+		regpair_write(dst_reg, value);
+		break;
+	case 0x01: // (direct) <- src_reg
+		addr = fetch16();
+		mmu_mem_write16(addr, value);
+		break;
+	case 0x10: // literal <- src_reg
+	    // Writes src to next two bytes after instruction.
+		addr = fetch_literal(2);
+		mmu_mem_write16(addr, value);
+		break;
+	case 0x11: // (src_reg + disp16) <- src_reg
+		addr = fetch16() + regpair_read(dst_reg);
+		mmu_mem_write16(addr, value);
+		break;
 	}
 	return 0;
 }
@@ -2037,7 +2137,7 @@ static char *flagcode(void)
 
 void cpu6_interrupt(unsigned trace)
 {
-	unsigned old_ipl;
+	unsigned old_ipl = cpu_ipl;
 	unsigned pending_ipl;
 
 	if (int_enable == 0)
@@ -2046,14 +2146,9 @@ void cpu6_interrupt(unsigned trace)
 	pending_ipl = pending_ipl_mask == 0 ? 0 : 31 - __builtin_clz(pending_ipl_mask);
 
 	if (pending_ipl > cpu_ipl) {
-		old_ipl = cpu_ipl;
 		halted = 0;
-		regpair_write(P, pc);
-		reg_write(CL, alu_out);
-		cpu_ipl = pending_ipl;
-		reg_write(CH, old_ipl);
-		pc = regpair_read(P);
-		alu_out = reg_read(CL);
+		switch_ipl(pending_ipl, SWITCH_IPL_RETURN);
+
 		if (trace)
 			fprintf(stderr,
 				"Interrupt %X: New PC = %04X, previous IPL %X\n",
@@ -2114,6 +2209,8 @@ unsigned cpu6_execute_one(unsigned trace)
 		return jump_op();
 	if (op == 0xb6 || op == 0xc6)
 		return semaphore_op();
+	if (op == 0xd6)
+		return store16();
 	if (op == 0xd7 || op == 0xe6)
 		return cpu6_il_mov();
 	if (op == 0xf6)
