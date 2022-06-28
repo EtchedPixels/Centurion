@@ -1409,7 +1409,7 @@ static int low_op(void)
 		 * from stack, load IPL from stack, load mmu tag from stack
 		 */
 		{
-			uint16_t new_x, new_pc, new_s;
+			uint16_t new_x, new_pc;
 			regpair_write(P, pc);
 			popbyte();	/* Skips one */
 			new_x = pop();	/* Loads X */
