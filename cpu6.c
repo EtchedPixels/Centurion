@@ -356,7 +356,7 @@ static uint32_t mmu_map(uint16_t addr)
  *	m - opn1 twobit address mode
  *	n - mem twobit address mode
  */
-static int mmu_transfer_op()
+static int mmu_transfer_op(void)
 {
 	unsigned subop = fetch();
 	// While opn1 is commonly an immediate, it can actually use any
@@ -510,7 +510,7 @@ static int block_op(int inst)
  *
  *  Appears to leave all registers unmodified?
  */
-static int memcpy16() {
+static int memcpy16(void) {
 	uint16_t len = regpair_read(A);
 	uint16_t sa  = regpair_read(B);
 	uint16_t da  = regpair_read(Y);
@@ -534,7 +534,7 @@ static int memcpy16() {
  * Valid sizes are 1 to 16 bytes
  * Some subops may take extra arguments via implicit registers
  */
-static int bignum_op() {
+static int bignum_op(void) {
 	unsigned sizes = fetch();
 	unsigned a_size = (sizes >> 4) + 1;
 	unsigned b_size = (sizes & 0xf) + 1;
@@ -1314,16 +1314,18 @@ static int branch_op(void)
 	case 14:		/* BTM - branch on teletype mark - CPU4 only ? */
 		t = 0;
 		break;
-	case 15:		/* BEP - branch on even parity - CPU4 only ? */
-		t = 0;
+	case 15:		/* B?? - branch of IL1 AH bit 0 set (see B6/C6) */
+		t = cpu_sram[0x10] & 0x01;
 		break;
 	}
 	/* We'll keep pc and reg separate until we know if/how it fits memory */
 	off = fetch();
 	/* Offset is applied after fetch leaves PC at next instruction */
-	if (t)
+	if (t) {
 		pc += off;
-	return 0;
+		return 18;
+	}
+	return 9;
 }
 
 /* Some of this is not clear */
@@ -1348,7 +1350,7 @@ static int low_op(void)
 		halted = 1;
 		break;
 	case 0x01:		/* NOP */
-		break;
+		return 4;
 	case 0x02:		/* SF   Set Fault */
 		alu_out |= ALU_F;
 		break;
@@ -1360,7 +1362,7 @@ static int low_op(void)
 		break;
 	case 0x05:		/* DI   Disable Interrupts */
 		int_enable = 0;
-		break;
+		return 8;
 	case 0x06:		/* SL   Set Link */
 		alu_out |= ALU_L;
 		break;
@@ -1562,8 +1564,9 @@ static int jump_op(void)
 	   to the following byte */
 	new_pc = decode_address(2, op & 0x07);
 	if (op & 0x08) {
-		/* guesswork time. 8500 implies it is not a simple branch and link */
-		/* the use of rt+ implies it's also not pc stacking, so try old X stacking */
+		/* Subroutine calls are a hybrid of the classic call/ret and
+		   branch/link. The old X is stacked, X is set to the new
+		   return address and then we jump */
 		push(regpair_read(X));
 		regpair_write(X, pc);
 		/* This is specifically stated in the EE200 manual */
@@ -1998,13 +2001,17 @@ static int alu5x_op(void)
  * Instruction 1F branches based on that reg, but doesn't show up in disassembly of LOAD
  * Disassembly of LOAD hints that it might disable the timer decrementer
  */
-static int semaphore_op() {
-	if (op == 0xb6)
+static int semaphore_op(void) {
+	switch(op) {
+	case 0xB6:
 		cpu_sram[0x10] = 0xff;
-	if (op == 0xc6)
+		return 0;
+	case 0xC6:
 		cpu_sram[0x10] = 0x00;
-
-	return 0;
+		return 0;
+	}
+	fprintf(stderr, "semop: internal\n");
+	exit(1);
 }
 
 /*
