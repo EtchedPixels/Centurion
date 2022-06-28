@@ -1776,6 +1776,41 @@ static int cpu6_il_mov(void)
 	return 0;
 }
 
+// 16bit store instruction.
+// With address modes for:
+//   - reg to reg
+//   - (direct)
+//   - immediate
+//   - indexed (with 16bit displacement)
+static int store16() {
+	uint16_t addr;
+	uint8_t regs = fetch();
+	unsigned dst_reg = (regs >> 4) & 0xe;
+	uint16_t value = regpair_read(regs & 0xe);
+
+	ldflags16(value); // Flags
+
+	switch(regs & 0x11) {
+	case 0x00: // dst_reg <- src_reg
+		regpair_write(dst_reg, value);
+		break;
+	case 0x01: // (direct) <- src_reg
+		addr = fetch16();
+		mmu_mem_write16(addr, value);
+		break;
+	case 0x10: // literal <- src_reg
+	    // Writes src to next two bytes after instruction.
+		addr = fetch_literal(2);
+		mmu_mem_write16(addr, value);
+		break;
+	case 0x11: // (src_reg + disp16) <- src_reg
+		addr = fetch16() + regpair_read(dst_reg);
+		mmu_mem_write16(addr, value);
+		break;
+	}
+	return 0;
+}
+
 static int loadstore_op(void)
 {
 	switch (op & 0x30) {
@@ -2174,6 +2209,8 @@ unsigned cpu6_execute_one(unsigned trace)
 		return jump_op();
 	if (op == 0xb6 || op == 0xc6)
 		return semaphore_op();
+	if (op == 0xd6)
+		return store16();
 	if (op == 0xd7 || op == 0xe6)
 		return cpu6_il_mov();
 	if (op == 0xf6)
