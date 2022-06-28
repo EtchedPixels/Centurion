@@ -1328,18 +1328,49 @@ static int branch_op(void)
 	return 9;
 }
 
-/* Some of this is not clear */
-static void reactivate_pri(void)
+#define SWITCH_IPL_RETURN  1
+#define SWITCH_IPL_RETURN_MODIFIED 2
+#define SWITCH_IPL_INTERRUPT 3
+
+static void switch_ipl(unsigned new_ipl, unsigned mode)
 {
-	/* Save flags */
-	uint16_t c = regpair_read(C);
-	c &= 0x0F;
-	c |= alu_out;
-	regpair_write(C, c);
-	/* Saved IPL */
-	cpu_ipl = (c >> 8) & 0x0F;
+	/*  C register layout:
+	 *
+	 *  15-12   Previous IPL
+	 *  11-8    Unknown, not used?
+	 *  7       Value (Zero)
+	 *  6       Minus (Sign)
+	 *  5       Fault (Overflow)
+	 *  4       Link (Carry)
+	 *  3-0     Memory MAP aka MMU aka Page Table Base
+	 */
+
+	unsigned old_ipl = cpu_ipl;
+	if (mode != SWITCH_IPL_RETURN_MODIFIED) {
+		// Save pc
+		regpair_write(P, pc);
+
+		// Save flags and MAP
+		reg_write(CL, alu_out | cpu_mmu);
+	}
+	cpu_ipl = new_ipl;
+
+	// We are now on the new level
+
+	// restore pc
 	pc = regpair_read(P);
-	alu_out = regpair_read(C) & 0x0F;
+
+	if (mode == SWITCH_IPL_INTERRUPT) {
+		// Save previous IPL, so we can return later
+		reg_write(CH, old_ipl << 4);
+	}
+
+	uint8_t cl = reg_read(CL);
+	// Restore flags
+	alu_out = cl & (ALU_L | ALU_F | ALU_M | ALU_V);
+
+	// Restore memory MAP
+	cpu_mmu = cl & 0x7;
 }
 
 /* Low operations - not all known */
@@ -1379,9 +1410,10 @@ static int low_op(void)
 	case 0x0A:		/* RI   Return from interrupt */
 		/* This may differ a bit on the CPU6 seems to have a carry
 		   involvement */
-		regpair_write(P, pc);
+		switch_ipl(reg_read(CH) >> 4, SWITCH_IPL_RETURN);
+		break;
 	case 0x0B:		/* RIM  Return from interrupt modified */
-		reactivate_pri();
+		switch_ipl(reg_read(CH) >> 4, SWITCH_IPL_RETURN_MODIFIED);
 		break;
 	case 0x0C:
 		/* EE200 historical ? - enable link to teletype */
@@ -2037,7 +2069,7 @@ static char *flagcode(void)
 
 void cpu6_interrupt(unsigned trace)
 {
-	unsigned old_ipl;
+	unsigned old_ipl = cpu_ipl;
 	unsigned pending_ipl;
 
 	if (int_enable == 0)
@@ -2046,14 +2078,9 @@ void cpu6_interrupt(unsigned trace)
 	pending_ipl = pending_ipl_mask == 0 ? 0 : 31 - __builtin_clz(pending_ipl_mask);
 
 	if (pending_ipl > cpu_ipl) {
-		old_ipl = cpu_ipl;
 		halted = 0;
-		regpair_write(P, pc);
-		reg_write(CL, alu_out);
-		cpu_ipl = pending_ipl;
-		reg_write(CH, old_ipl);
-		pc = regpair_read(P);
-		alu_out = reg_read(CL);
+		switch_ipl(pending_ipl, SWITCH_IPL_RETURN);
+
 		if (trace)
 			fprintf(stderr,
 				"Interrupt %X: New PC = %04X, previous IPL %X\n",
