@@ -97,35 +97,31 @@ static int select_wrapper(int maxfd, fd_set* i, fd_set* o)
 	return rc;
 }
 
-void mux_poll_fds(struct MuxUnit* mux, unsigned trace)
+void mux_poll_fds(unsigned trace)
 {
-	fd_set i, o;
+	fd_set i;
 	int max_fd = 0;
 	int unit;
 
 	FD_ZERO(&i);
-	FD_ZERO(&o);
 
 	for (unit = 0; unit < NUM_MUX_UNITS; unit++) {
-		int ifd = mux[unit].in_fd;
+		int ifd = mux_get_in_poll_fd(unit);
 
-		/* Do not waste time repetitively polling ports,
-		 * which we know are ready.
-		 */
-		if (!(ifd == -1 || mux[unit].status & MUX_RX_READY || mux[unit].rx_ready_time)) {
-			FD_SET(ifd, &i);
-			if (ifd >= max_fd)
-				max_fd = ifd + 1;
-		}
+		if (ifd == -1)
+			continue;		
+		FD_SET(ifd, &i);
+		if (ifd >= max_fd)
+			max_fd = ifd + 1;
 	}
 
 	if (max_fd > 0) {
-	 	if (select_wrapper(max_fd, &i, &o) == -1)
+	 	if (select_wrapper(max_fd, &i, NULL) == -1)
 			return;
 	}
 
 	for (unit = 0; unit < NUM_MUX_UNITS; unit++) {
-		int ifd = mux[unit].in_fd;
+		int ifd = mux_get_in_fd(unit);
 
 		if (ifd != -1 && FD_ISSET(ifd, &i))
 			mux_set_read_ready(unit, trace);

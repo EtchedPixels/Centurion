@@ -33,5 +33,7 @@ void mux_write(uint16_t addr, uint8_t val, uint32_t trace);
 uint8_t mux_read(uint16_t addr, uint32_t trace);
 
 void mux_set_read_ready(unsigned unit, unsigned trace);
+int mux_get_in_poll_fd(unsigned unit);
+int mux_get_in_fd(unsigned unit);
 
-void mux_poll_fds(struct MuxUnit* mux, unsigned trace);
+void mux_poll_fds(unsigned trace);

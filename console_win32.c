@@ -92,19 +92,14 @@ static int tty_check_readable(int fd)
         }
 }
 
-void mux_poll_fds(struct MuxUnit* mux, unsigned trace)
+void mux_poll_fds(unsigned trace)
 {
 	int unit;
 
 	for (unit = 0; unit < NUM_MUX_UNITS; unit++) {
-		int ifd = mux[unit].in_fd;
+		int ifd = mux_get_in_poll_fd(unit);
 
-		/* Do not waste time repetitively polling ports,
-		 * which we know are ready.
-		 */
-		if (!(ifd == -1 || mux[unit].status & MUX_RX_READY)) {
-                        if (tty_check_readable(ifd))
-                                mux_set_read_ready(unit, trace);
-		}
+                if (ifd != -1 && tty_check_readable(ifd))
+                        mux_set_read_ready(unit, trace);
 	}
 }
