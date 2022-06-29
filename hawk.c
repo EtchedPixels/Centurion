@@ -178,8 +178,10 @@ void hawk_dma_done(void)
  *	 sector length and padded the sector to 512 bytes."
  *			-- Ken Romain
  */
-static void hawk_cmd(uint8_t cmd)
+static void hawk_cmd(uint8_t cmd, unsigned trace)
 {
+        if (trace)
+                fprintf(stderr, "%04X Hawk unit %02X command %02X\n", cpu6_pc(), hawk_unit, cmd);
 	switch (cmd) {
 	case 0:		/* Multi sector read  - 1 to 16 sectors */
 		hawk_busy = 1;
@@ -211,7 +213,7 @@ static void hawk_cmd(uint8_t cmd)
 	}
 }
 
-void hawk_write(uint16_t addr, uint8_t val)
+void hawk_write(uint16_t addr, uint8_t val, unsigned trace)
 {
 	switch (addr) {
 	case 0xF140:
@@ -231,7 +233,7 @@ void hawk_write(uint16_t addr, uint8_t val)
 		hawk_status = 0;
 		break;
 	case 0xF148:
-		hawk_cmd(val);
+		hawk_cmd(val, trace);
 		break;
 	default:
 		fprintf(stderr,
@@ -240,7 +242,7 @@ void hawk_write(uint16_t addr, uint8_t val)
 	}
 }
 
-uint8_t hawk_read(uint16_t addr)
+uint8_t hawk_read(uint16_t addr, unsigned trace)
 {
 	switch (addr) {
 	case 0xF144:		/* Some kind of status - NZ is error */

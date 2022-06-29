@@ -30,6 +30,7 @@ static uint64_t cpu_timestamp_ns = 0;
 #define TRACE_CMD	32
 #define TRACE_PARITY	64
 #define TRACE_MUX	128
+#define TRACE_DSK       256
 
 unsigned int trace = 0;
 
@@ -505,7 +506,7 @@ static uint8_t io_read8(uint16_t addr)
 	if (addr == 0xF110)
 		return switches;
 	if (addr >= 0xF140 && addr <= 0xF14F)
-		return hawk_read(addr);
+		return hawk_read(addr, trace & TRACE_DSK);
 	if (addr >= 0xF200 && addr <= 0xF21F)
 		return mux_read(addr, trace & TRACE_MUX);
 	fprintf(stderr, "%04X: Unknown I/O read %04X\n", cpu6_pc(), addr);
@@ -524,7 +525,7 @@ static void io_write8(uint16_t addr, uint8_t val)
 		hexdisplay(addr, val);
 		return;
 	} else if (addr >= 0xF140 && addr <= 0xF14F) {
-		hawk_write(addr, val);
+		hawk_write(addr, val, trace & TRACE_DSK);
 		return;
 	} else if (addr >= 0xF200 && addr <= 0xF21F) {
 		mux_write(addr, val, trace & TRACE_MUX);
