@@ -45,8 +45,13 @@ static unsigned int next_char(uint8_t unit)
 	int r;
 	unsigned char c;
 
-
-	if (mux[unit].in_fd == -1) {
+	/* Do not allow read the next character from the fd before RX_READY is set
+	 * Some simple IRQ handlers (WIPL) may just blindly read all the data registers
+	 * in an attempt to clear an unexpected IRQ.
+	 * This should also cover an unconnected units (in_fd == -1) because they will
+	 * never become ready to read
+	 */
+	if (!(mux[unit].status & MUX_RX_READY)) {
 		return mux[unit].lastc;
 	}
 
@@ -313,6 +318,7 @@ void mux_process_events(unsigned unit, unsigned trace) {
 	uint64_t time = get_current_time();
 
 	if (mux[unit].rx_ready_time && mux[unit].rx_ready_time <= time) {
+		assert(mux[unit].in_fd != -1);
 		mux[unit].rx_ready_time = 0;
 		mux[unit].status |= MUX_RX_READY;
 		poll_count = 0;
