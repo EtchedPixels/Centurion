@@ -522,10 +522,10 @@ static int block_op(int inst)
 			}
 		}
 		return 0;
-	case 0x90:
-		uint8_t val = mmu_mem_read8(sa);
+	case 0x90: /* memset */
+		chr = mmu_mem_read8(sa);
 		while (dst_len--) {
-			mmu_mem_write8(da++, val);
+			mmu_mem_write8(da++, chr);
 		}
 		return 0;
 	default:
