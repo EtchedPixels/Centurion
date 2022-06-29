@@ -179,28 +179,28 @@ void mux_write(uint16_t addr, uint8_t val, uint32_t trace)
 	}
 
 	if (unit > NUM_MUX_UNITS) {
-		fprintf(stderr, "MUX%i: Write to disabled unit reg %x\n", unit, addr);
+		fprintf(stderr, "%04X MUX%i: Write to disabled unit reg %x\n", cpu6_pc(), unit, addr);
 		return;
 	}
 
 	switch(mode) {
 	case 0: // Status Reg
 		if (trace)
-			fprintf(stderr, "MUX%i: Status Write %x\n", unit, val);
+			fprintf(stderr, "%04X MUX%i: Status Write %x\n", cpu6_pc(), unit, val);
 		// TODO: Implement baud
 		return;
 	case 1: // Data Reg
 		if (trace) {
+			fprintf(stderr, "%04X MUX%i: Data Write %x\n", cpu6_pc(), unit, val);
 			if ((val&0x7f) >= 0x20 && val != 0x7F && val != 0xff)
-				fprintf(stderr, "MUX%i: Data Write %x ('%c')\n", unit, val, val & 0x7f);
-			else
-				fprintf(stderr, "MUX%i: Data Write %x\n", unit, val);
+				fprintf(stderr, " ('%c')", val & 0x7f);
+			fputc('\n', stderr);
 		}
 		mux_unit_send(unit, val);
 		return;
 	case 0xA: // Set RX interrupt request level
 		if (trace)
-			fprintf(stderr, "MUX%i: RX level = %i\n", unit, val);
+			fprintf(stderr, "%04X MUX%i: RX level = %i\n", cpu6_pc(), unit, val);
 		rx_ipl_request = val;
 		return;
 	case 0xC:
@@ -214,7 +214,7 @@ void mux_write(uint16_t addr, uint8_t val, uint32_t trace)
 		return;
 	case 0xE: // Set TX interrupt request level
 		if (trace)
-			fprintf(stderr, "MUX%i: TX level = %i\n", unit, val);
+			fprintf(stderr, "%04X MUX%i: TX level = %i\n", cpu6_pc(), unit, val);
 		tx_ipl_request = val;
 		return;
 	case 8: // These two are Written by @LOAD CRT driver
@@ -237,7 +237,7 @@ uint8_t mux_read(uint16_t addr, uint32_t trace)
 	// It seems that all mux units share the same cause register via chaining
 	if (addr == 0xf20f) {
 		if (trace)
-			fprintf(stderr, "MUX: InterruptCause Read: %02x\n",irq_cause);
+			fprintf(stderr, "%04X MUX: InterruptCause Read: %02x\n", cpu6_pc(), irq_cause);
 
 		if (irq_cause & MUX_IRQ_TX) {
 			// Reading this register is enough to clear the TX IRQ, but it seems
@@ -272,7 +272,7 @@ uint8_t mux_read(uint16_t addr, uint32_t trace)
 
 	if (unit > NUM_MUX_UNITS) {
 		if (addr != 0xf20f)
-			fprintf(stderr, "MUX%i: Read to disabled unit reg %x", unit, addr);
+			fprintf(stderr, "%04X MUX%i: Read to disabled unit reg %x", cpu6_pc(), unit, addr);
 		return data;
 	}
 
@@ -282,7 +282,7 @@ uint8_t mux_read(uint16_t addr, uint32_t trace)
 		// Force CTS on
 		data = mux[unit].status | MUX_CTS;
 		if (trace)
-			fprintf(stderr, "MUX%i: Status Read = %02x\n", unit, data);
+			fprintf(stderr, "%04X MUX%i: Status Read = %02x\n", cpu6_pc(), unit, data);
 
 		break;
 	case 0x1:
@@ -290,10 +290,10 @@ uint8_t mux_read(uint16_t addr, uint32_t trace)
 		data = next_char(unit);
 		mux[unit].status &= ~MUX_RX_READY;
 		if (trace)
-			fprintf(stderr, "MUX%i: Data Read = %02x ('%c')\n", unit, data, data);
+			fprintf(stderr, "%04X MUX%i: Data Read = %02x ('%c')\n", cpu6_pc(), unit, data, data);
 		break;
 	default:
-		fprintf(stderr, "MUX%i: Unknown Register %x Read\n", unit, addr);
+		fprintf(stderr, "%04X MUX%i: Unknown Register %x Read\n", cpu6_pc(), unit, addr);
 		break;
 	}
 
