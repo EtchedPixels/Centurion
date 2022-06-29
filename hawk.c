@@ -33,17 +33,47 @@
  *	at the moment.
  */
 
+/* I've taken the number from the ceiling */
+#define NUM_HAWK_UNITS 8
+
 static uint8_t hawk_unit;
 static uint8_t hawk_sech;
 static uint8_t hawk_secl;
 static uint8_t hawk_busy;
 static uint8_t hawk_status;
-static int hawk_fd;
+
+/*
+ * Error codes are completely made up, we don't know
+ * original ones (yet)
+ */
+#define STATUS_OK               0
+#define STATUS_NO_DISK          0xFD
+#define STATUS_OPERATION_FAILED 0xFE
+
+static int hawk_fd[NUM_HAWK_UNITS];
 
 void hawk_init(void)
 {
-       	/* We don't worry here is this works or not */
-	hawk_fd = open("hawk.disk", O_RDWR|O_BINARY);
+        int i;
+        char name[32];
+
+        for (i = 0; i < NUM_HAWK_UNITS; i++) {
+                sprintf(name, "hawk%u.disk", i);
+       	        /* We don't worry here is this works or not */
+	        hawk_fd[i] = open(name, O_RDWR|O_BINARY);
+        }
+}
+
+static int hawk_get_fd(void)
+{
+        return hawk_unit < NUM_HAWK_UNITS ? hawk_fd[hawk_unit] : -1;
+}
+
+static void hawk_set_status(uint8_t status)
+{
+        hawk_set_dma(0);
+	hawk_busy = 0;
+	hawk_status = status;
 }
 
 /*	"Cylinder  0 - 405
@@ -75,6 +105,7 @@ static void hawk_position(void)
 	unsigned head = !!(hawk_secl & 0x10);
 	unsigned cyl = (hawk_sech << 3) | (hawk_secl >> 5);
 	off_t offset = cyl;
+        int fd = hawk_get_fd();
 
 	offset *= 2;
 	offset += head;
@@ -82,42 +113,44 @@ static void hawk_position(void)
 	offset += sec;
 	offset *= 400;
 
-	if (lseek(hawk_fd, offset, SEEK_SET) == -1) {
+	if (fd == -1) {
+                hawk_set_status(STATUS_NO_DISK);
+        } else if (lseek(fd, offset, SEEK_SET) == -1) {
 		fprintf(stderr, "hawk position failed (%d,%d,%d) = %lx.\n",
 			cyl, head, sec, (long) offset);
-		hawk_set_dma(0);
-		hawk_busy = 0;
-		hawk_status = 0xFE;
+                hawk_set_status(STATUS_OPERATION_FAILED);
 	}
 }
 
 uint8_t hawk_read_next(void)
 {
+        int fd = hawk_get_fd();
 	uint8_t c;
-	if (read(hawk_fd, (void *) &c, 1) != 1) {
-		hawk_status = 0xFE;	/* dunno but it does for error, completed */
-		hawk_set_dma(0);
-		hawk_busy = 0;
+
+        if (fd == -1) {
+                hawk_set_status(STATUS_NO_DISK);
+        } else if (read(fd, (void *) &c, 1) != 1) {
 		fprintf(stderr, "hawk I/O error\n");
+                hawk_set_status(STATUS_OPERATION_FAILED);
 	}
 	return c;
 }
 
 void hawk_write_next(uint8_t c)
 {
-	if (write(hawk_fd, (void *) &c, 1) != 1) {
-		hawk_status = 0xFE;	/* dunno but it does for error, completed */
-		hawk_set_dma(0);
-		hawk_busy = 0;
+        int fd = hawk_get_fd();
+
+	if (fd == -1) {
+                hawk_set_status(STATUS_NO_DISK);
+        } else if (write(fd, (void *) &c, 1) != 1) {
 		fprintf(stderr, "hawk I/O error\n");
+                hawk_set_status(STATUS_OPERATION_FAILED);
 	}
 }
 
 void hawk_dma_done(void)
 {
-	hawk_busy = 0;
-	hawk_status = 0;
-	hawk_set_dma(0);
+        hawk_set_status(STATUS_OK);
 }
 
 /*
