@@ -217,9 +217,9 @@ void mux_write(uint16_t addr, uint8_t val, uint32_t trace)
 			fprintf(stderr, "MUX%i: TX level = %i\n", unit, val);
 		tx_ipl_request = val;
 		return;
-	case 8:
+	case 8: // These two are Written by @LOAD CRT driver
 	case 0xB:
-		// Written by CRT driver
+	case 0xD: // Raw text output is written here by WIPL; perhaps some debug port
 		if (!trace)
 			return; // Hide when not tracing
 	default:
