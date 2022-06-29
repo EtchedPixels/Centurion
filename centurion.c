@@ -16,6 +16,7 @@
 #include "dma.h"
 #include "hawk.h"
 #include "mux.h"
+#include "cbin_load.h"
 
 static unsigned finch;		/* Finch or original FDC */
 
@@ -544,12 +545,12 @@ static uint32_t remap(uint32_t addr)
 	return addr;
 }
 
-static uint8_t do_mem_read8(uint32_t addr, int dis)
+static uint8_t do_mem_read8(uint32_t addr, int debug)
 {
 	unsigned parity_off = 0;
 
 	if (addr >= 0x3F000 && addr < 0x3FC00) {
-		if (dis)
+		if (debug)
 			return 0xFF;
 		else
 			return io_read8(addr & 0xFFFF);
@@ -587,17 +588,20 @@ uint8_t mem_read8_debug(uint32_t addr)
 	return do_mem_read8(addr, 1);
 }
 
+uint16_t mem_read16_debug(uint32_t addr)
+{
+	return (do_mem_read8(addr, 1) << 8) | do_mem_read8(addr+1, 1);
+}
+
+static void mem_do_write8(uint32_t addr, uint8_t val)
+{
+	addr = remap(addr);
+	memclean[addr] = 1;
+	mem[addr] = val;
+}
+
 void mem_write8(uint32_t addr, uint8_t val)
 {
-	if (trace & TRACE_MEM_WR)
-		if (addr > 0xFF || (trace & TRACE_MEM_REG))
-			fprintf(stderr, "%04X: %05X W %02X\n", cpu6_pc(),
-				addr, val);
-	if (addr >= 0x3F000 && addr < 0x3FC00) {
-		io_write8(addr & 0xFFFF, val);
-		return;
-	}
-
 	if (diag && addr >= 0x08000 && addr < 0x0B800) {
 		fprintf(stderr, "%04X: Write to ROM [%05X]\n", cpu6_pc(), addr);
 		return;
@@ -606,9 +610,30 @@ void mem_write8(uint32_t addr, uint8_t val)
 		fprintf(stderr, "%04X: Write to ROM [%05X]\n", cpu6_pc(), addr);
 		return;
 	}
-	addr = remap(addr);
-	memclean[addr] = 1;
-	mem[addr] = val;
+	if (trace & TRACE_MEM_WR)
+		if (addr > 0xFF || (trace & TRACE_MEM_REG))
+			fprintf(stderr, "%04X: %05X W %02X\n", cpu6_pc(),
+				addr, val);
+	if (addr >= 0x3F000 && addr < 0x3FC00) {
+		io_write8(addr & 0xFFFF, val);
+		return;
+	}
+	mem_do_write8(addr, val);
+}
+
+void mem_write8_debug(uint32_t addr, uint8_t val)
+{
+	// a debugger is allowed to modify rom, but not IO
+	if (addr >= 0x3F000 && addr < 0x3FC00) {
+		return;
+	}
+	mem_do_write8(addr, val);
+}
+
+void mem_write16_debug(uint32_t addr, uint16_t val)
+{
+	mem_write8_debug(addr, val >> 8);
+	mem_write8_debug(addr+1, val & 0xff);
 }
 
 uint64_t get_current_time() {
@@ -632,6 +657,11 @@ static void load_rom(const char *name, uint32_t addr, uint16_t len)
 		perror(name);
 		exit(1);
 	}
+	if (len == 0) {
+		fseek(fp, 0L, SEEK_END);
+		len = ftell(fp);
+		rewind(fp);
+	}
 	if (fread(mem + addr, len, 1, fp) != 1) {
 		fprintf(stderr, "%s: read error.\n", name);
 		exit(1);
@@ -642,21 +672,60 @@ static void load_rom(const char *name, uint32_t addr, uint16_t len)
 void usage(void)
 {
 	fprintf(stderr,
-		"centurion [-l port] [-d] [-s switches] [-S diagswitches] [-t trace] [-T terminateAfter]\n");
+		"centurion [options] [bootfile]\n"
+		"\n"
+		"When supplied, bootfile will be loaded as centurion binary (default) OR raw binary\n"
+		"\n"
+		"Options:\n"
+		" -b           bootfile is raw binary\n"
+		" -A <addr>    bootfile will be loaded at offset <addr>\n"
+		" -E <addr>    entry point for binary"
+		" -d           emulate DIAG card\n"
+		" -F           emulate a finch drive\n"
+		" -l <port>    Listen for telnet on the given <port> number\n"
+		" -s <value>   set CPU switches as a decimal value. Switch 1-4 are Sense\n"
+		" -S <value>   set diag switches as decimal value (only effective with `-d`)\n"
+		" -t <value>   enable enable system trace to stderr. See readme for values\n"
+		" -T <value>   Exit after executing <value> instructions\n"
+	);
 	exit(1);
+}
+
+uint16_t parse_address(char *arg, char* arg_name) {
+	char* end_ptr = NULL;
+
+	uint16_t load_addr = strtoul(arg, &end_ptr, 16);
+	if (load_addr < 0x100 || end_ptr == NULL) {
+		fprintf(stderr, "%s address not valid\n", arg_name);
+		exit(1);
+	}
+	return load_addr;
 }
 
 int main(int argc, char *argv[])
 {
 	int opt;
+	unsigned binary = 0;
 	unsigned port = 0;
 	long long terminate_at = 0;
 	long long instruction_count = 0;
+	uint16_t load_addr = 0;
+	uint16_t entry_addr = 0;
+	char* boot_file = NULL;
 
 	mux_init();
 
-	while ((opt = getopt(argc, argv, "dFl:s:S:t:T:")) != -1) {
+	while ((opt = getopt(argc, argv, "b::A:E:dFl:s:S:t:T:")) != -1) {
 		switch (opt) {
+		case 'b':
+			binary = 1;
+			break;
+		case 'A':
+			load_addr = parse_address(optarg, "Load");
+			break;
+		case 'E':
+			entry_addr = parse_address(optarg, "Entry");
+			break;
 		case 'd':
 			diag = 1;
 			break;
@@ -685,12 +754,16 @@ int main(int argc, char *argv[])
 		}
 	}
 	if (optind < argc)
+		boot_file = argv[optind++];
+
+	if (optind < argc)
 		usage();
 
 	if (port == 0)
 		tty_init();
 	else
 		net_init(port);
+
 	load_rom("bootstrap_unscrambled.bin", 0x3FC00, 0x0200);
 	if (diag) {
 		load_rom("Diag_F1_Rev_1.0.BIN", 0x08000, 0x0800);
@@ -699,9 +772,40 @@ int main(int argc, char *argv[])
 		load_rom("Diag_F4_1133CMD.BIN", 0x09800, 0x0800);
 	}
 
-
 	hawk_init();
 	cpu6_init();
+
+	if (boot_file != NULL) {
+		if (binary) {
+			if (load_addr == 0) {
+				fprintf(stderr, "raw binary needs a load address\n");
+				exit(1);
+			}
+			load_rom(boot_file, load_addr, 0);
+			if (entry_addr == 0) {
+				// by default, enter at first byte of binary
+				entry_addr = load_addr;
+			}
+			printf("Raw Binary %s loaded to %04hx; entry at %04hx\n\n",
+				boot_file, load_addr, entry_addr);
+		} else {
+			entry_addr = cbin_load(boot_file, load_addr);
+		}
+	}
+
+	if (entry_addr != 0) {
+		set_pc_debug(entry_addr);
+
+		if (binary) {
+			// Standard launch args from bootstrap ROM
+			regpair_write_debug(S, 0x1000);   // Stack
+		} else {
+			// Standard launch args from WIPL:
+			regpair_write_debug(S, 0xEA35);   // Stack
+			regpair_write_debug(Z, 0);        // Disk Number
+			regpair_write_debug(A, 0x00C5);   // AL= mux0 config?
+		}
+	}
 
 	while (!emulator_done) {
 		cpu6_execute_one(trace & TRACE_CPU);

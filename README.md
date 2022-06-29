@@ -80,7 +80,7 @@ AUXILIARY TESTS
 ENTER TEST NUMBER:_
 ```
 
-## Test operating system
+#### Test operating system
 
 The test operating system is program `10` (0x0A) on the diag board. You can run it like so:
 
@@ -97,16 +97,77 @@ The test OS can be used as follows:
 
 For more info, view [the video from Usagi Electrics using the test OS](https://youtu.be/_j2L6nkO8MQ?list=PLnw98JPyObn0wJFdbcRDP7LMz8Aw2T97V&t=828).
 
-## Command line options
+#### Test Executables
+
+Test executables from the disk dumps (filename starting with ?) can be loaded directly.
+
+For example
+
+```
+./centurion \?FLEX.4.bin
+Centurion Binary ?FLEX.4.bin loaded; entry at 0100
+
+[0C][1B][1C]?FLEX - FLEXIBLE DISK DIAGNOSTIC - REVISION 1.3
+
+T)  TOS
+Z)  RTZ
+E)  ERROR
+F)  FORMAT
+S)  SEEK TEST
+R)  READ TEST
+W)  WRITE TEST
+M)  MEMORY TEST
+P)  PASS COUNTER
+A)  AUDIO CONTROL
+H)  HEAD ALIGNMENT
+C)  CONVERT ADDRESS
+L)  RETURN TO LOADER
+X)  CONTROLLER ADDRESS
+
+ENTER TEST CODE: 
+```
+
+#### Raw binaries
+
+Raw binaries can be loaded directly
+
+For example:
+
+```
+# hellorld, modified to halt
+echo "79 86 23 C8 E5 EC EC EF F2 EC E4 A1 8D 8A 00 00" | xxd -r -p - > hellorld.bin
+
+# remember to enable diagnostic board, because hellorld uses it's print function
+
+./centurion -d -A 0x100 -b hellorld.bin
+Raw Binary hellorld.bin loaded to 0100; entry at 0100
+
+Hellorld!
+System halted at 010F
+```
+
+## Command line
+
+`./centurion [options] [bootfile]`
+
+When supplied, bootfile will be loaded as centurion binary (default) OR raw binary
+
+Otherwise the emulator defaults to booting the bootstrap
+
+### Options
 
 The following options can be used when running the emulator:
 
+- `-b` bootfile is raw binary
+- `-A <addr>` bootfile will be loaded at offset <addr>
+- `-E <addr>` override entry point (only effective with a bootfile)
 - `-d` set the diag mode on
 - `-F` emulate a finch drive
 - `-l <port-number>` Listen for telnet on the given port number
 - `-s <value>` set CPU switches as a decimal value. Switch 1 is *sense*
 - `-S <value>` set diag switches as decimal value (only effective with `-d`)
 - `-t <value>` enable system trace in terminal - See below
+- `-T <value>` Exit after executing <value> instructions
 
 ## System trace
 
