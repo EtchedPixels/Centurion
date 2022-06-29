@@ -349,7 +349,7 @@ void mux_poll(unsigned trace)
 
 	// Cheap speedhack, only check FDs sometimes
 	if ((poll_count++ & 0xF) == 0)
-		mux_poll_fds(mux, trace);
+		mux_poll_fds(trace);
 
 	cpu_deassert_irq(rx_ipl_request);
 	cpu_deassert_irq(tx_ipl_request);
@@ -372,4 +372,18 @@ void mux_poll(unsigned trace)
 		fprintf(stderr, "MUX: Last mux interrupt acknowledged\n");
 
 	irq_cause = -1;
+}
+
+int mux_get_in_poll_fd(unsigned unit)
+{
+        /* Do not poll if already has a pending character or of the
+         * delay hasn't expired yet */
+        if (mux[unit].status & MUX_RX_READY || mux[unit].rx_ready_time)
+                return -1;
+        return mux[unit].in_fd;
+}
+
+int mux_get_in_fd(unsigned unit)
+{
+	return mux[unit].in_fd;
 }
