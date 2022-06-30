@@ -2225,6 +2225,18 @@ uint16_t cpu6_pc(void)
 	return exec_pc;
 }
 
+void set_pc_debug(uint16_t new_pc) {
+	pc = new_pc;
+}
+
+void reg_write_debug(uint8_t r, uint8_t v) {
+	reg_write(r, v);
+}
+
+void regpair_write_debug(uint8_t r, uint16_t v) {
+	regpair_write(r, v);
+}
+
 void cpu6_set_switches(unsigned v)
 {
 	switches = v;
