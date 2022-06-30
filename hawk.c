@@ -39,11 +39,70 @@
 static uint8_t hawk_unit;
 static uint8_t hawk_sech;
 static uint8_t hawk_secl;
-static uint8_t hawk_busy;
-static uint8_t hawk_on_track;
-static uint8_t hawk_data_error;
-static uint8_t hawk_seek_error;
+
+// All these "from Hawk unit" signals are muxed to selected unit.
+
+// Ready
+// From Hawk unit.
+// High when:
+//  - This disk cartridge is installed
+//  - Spindle motor speed is correct
+//  - heads loaded
+//  - DC voltages within margin
+//  - no fault condition exists
+//  - unit selected
+//  - terminator is present and has power
 static uint8_t hawk_ready;
+
+// On Cyl (On Cylinder)
+// From Hawk unit.
+// Set when the heads have finished seeking to the desired address.
+// Also high when a seek error occurs
+static uint8_t hawk_on_cyl;
+
+// Sker (Seek Error)
+// From Hawk unit
+// Set when the unit was unable to complete a seek operation.
+// A RTZS command from the controller clears the seek error
+// condition and returns the heads to cylinder 00.
+// On Cylinder is also asserted during seek error.
+static uint8_t hawk_seek_error;
+
+// Fault
+// From Hawk unit
+// Indicates that the unit has encounterd one or more fault conditions:
+//  - more than one head selected
+//  - read and write gates true at same time
+//  - read and erase gates true at same time
+//  - controller enabled only one of the write and erase gates
+//  - low voltage
+//  - selecting fixed heads on drive without fixed disk option
+//  - Emergency retract
+//
+// Stays high until a RTZS operation.
+static uint8_t hawk_fault;
+
+// Unimplemented output signals from Hawk unit
+// Some of them probally go in status.
+//   Index (sector 0 pulse), Sector (one pulse per sector),
+//   Address Interlock (bad address), Address Acknowledge (address accepted),
+//   Wr State (Write Protect), Sector Address (upto 6 bits), Density.
+//
+// // See Page 25 of HAWK_9427_BP11_OCT80.pdf for details
+
+// Busy
+// From controller
+// This is probally only set when it's doing (or waiting to do)
+// a DMA operation. But the controller might also mix in the On Cylinder
+// line while seeking.
+static uint8_t hawk_dma_busy;
+
+// Data Error
+// This is just a stand in for error various read/write error conditions.
+// Probally mostly coming from the controllers state machine. Sector not
+// found, or CRC failed. Probally also includes the Fault line
+static uint8_t hawk_data_error;
+
 
 static int hawk_fd[NUM_HAWK_UNITS];
 
@@ -65,29 +124,33 @@ static int hawk_get_fd(void)
 }
 
 static uint16_t hawk_get_status() {
+	// Not sure where data errors and fault goes,
+	// lets just put it in all these remaining bits we suspect are errors
+	uint8_t unk_error_bit = hawk_fault | hawk_data_error;
+
 	return (0               << 0) // Potentially four bits of current sector?
 	     | (0               << 1)
 	     | (0               << 2)
 	     | (0               << 3)
 	     | (hawk_ready      << 4) // Probally the ready signal from drive
-	     | (hawk_on_track   << 5) // Head is on the correct track
+	     | (hawk_on_cyl     << 5) // Head is on the correct cylinder, line from drive
 	     | (0               << 6)
 	     | (0               << 7)
-	     | (hawk_busy       << 8) // Command in progress
+	     | (hawk_dma_busy   << 8) // Read/Write/Fmt command in progress
 // WIPL ignores bit 9 after read, Bootstrap requires it to be zero after read
-	     | (0               << 9)
-// Not sure where data_error goes, lets just put it in all remaining unknown bits
-	     | (hawk_data_error << 10)
-	     | (hawk_data_error << 11)
-	     | (hawk_data_error << 12)
-	     | (hawk_data_error << 13)
+	     | (0               << 9) // either write error, or not an error
+	     | (unk_error_bit  << 10)
+	     | (unk_error_bit  << 11)
+	     | (unk_error_bit  << 12)
+	     | (unk_error_bit  << 13)
 // Bootstrap loops forever unless either seek_error or on_track goes high
-	     | (hawk_seek_error << 14) // Seek error?
-	     | (hawk_data_error << 15);
+	     | (hawk_seek_error << 14) // Seek error line from drive
+	     | (unk_error_bit  << 15);
 }
 
 /*	"Cylinder  0 - 405
  *	 MSB:
+
  *		Cyl 256
  *		Cyl 128
  *		Cyl 64
@@ -123,7 +186,7 @@ static void hawk_position(void)
 	offset += sec;
 	offset *= 400;
 
-	hawk_on_track = 0;
+	hawk_on_cyl = 0;
 	if (fd != -1) {
 		if (lseek(fd, offset, SEEK_SET) == -1) {
 			fprintf(stderr, "hawk position failed (%d,%d,%d) = %lx.\n",
@@ -131,7 +194,7 @@ static void hawk_position(void)
 			hawk_seek_error = 1;
 		} else {
 			// Successful seek
-			hawk_on_track = 1;
+			hawk_on_cyl = 1;
 		}
 	} else {
 		hawk_seek_error = 1;
@@ -168,8 +231,10 @@ void hawk_write_next(uint8_t c)
 void hawk_dma_done(void)
 {
     hawk_set_dma(0);
-	hawk_busy = 0;
-	hawk_data_error = !hawk_on_track;
+	hawk_dma_busy = 0;
+
+	// The Hawk disk unit will fault if a read/write is done off cylinder
+	hawk_fault |= !hawk_on_cyl;
 }
 
 /*
@@ -202,34 +267,39 @@ static void hawk_cmd(uint8_t cmd, unsigned trace)
 	if (trace)
 		fprintf(stderr, "%04X Hawk unit %02X command %02X\n", cpu6_pc(), hawk_unit, cmd);
 
-	// Guess. Executing commands seems to clear errors
-	hawk_data_error = 0;
-	hawk_seek_error = 0;
-
 	switch (cmd) {
 	case 0:		/* Multi sector read  - 1 to 16 sectors */
-		hawk_busy = 1;
+		hawk_dma_busy = 1;
 		hawk_set_dma(1);
-		//hawk_check_position();
 		break;
 	case 1:		/* Multi sector write - ditto */
-		hawk_busy = 1;
+		hawk_dma_busy = 1;
         hawk_set_dma(2);
-		//hawk_check_position();
 		break;
 	case 2:		/* Seek */
-		hawk_busy = 0;
+		// Guess. Seeks probally don't set busy
 		hawk_position();
 		break;
-	case 3:		/* Return to Track Zero (Recalibrate) */
-		// Slams the heads into the rubber stops, and then seeks to track
+	case 3:		/* Return to Track Zero Sector (Recalibrate) */
+		// Slams the heads into the rubber stops, and then seeks to the first track
+
+		// According to documentation, The Hawk drive unit will clear any seek
+		// errors and faults on RTZS
+		hawk_seek_error = 0;
+		hawk_fault = 0;
+
+		// Guess, but chances are the controller also clears it's data errors on RTZS
+		hawk_data_error = 0;
+
+		// Guess. Seeks probally don't set busy
+
 		hawk_position();
 		break;
 	case 4:		/* Format sector - Ken thinks but not sure */
 	default:
 		fprintf(stderr, "%04X: Unknown hawk command %02X\n",
 			cpu6_pc(), cmd);
-		hawk_busy = 0;
+		hawk_dma_busy = 0;
 		break;
 	}
 }
@@ -239,6 +309,8 @@ void hawk_write(uint16_t addr, uint8_t val, unsigned trace)
 	switch (addr) {
 	case 0xF140:
 		hawk_unit = val;
+		// On a real drive it's more complex. But for us, if
+		// we have an image file for the unit, it's ready.
 		hawk_ready = (hawk_get_fd() != -1);
 		if (trace)
 			fprintf(stderr, "Selected hawk unit %i\n", val);
@@ -281,7 +353,7 @@ uint8_t hawk_read(uint16_t addr, unsigned trace)
 			fprintf(stderr, "%04X: hawk status read low  | __%02x\n", cpu6_pc(), status);
 		return status ;
 	case 0xF148:		/* Bit 0 seems to be set while it is processing */
-		return hawk_busy;
+		return hawk_dma_busy;
 	default:
 		fprintf(stderr, "%04X: Unknown hawk I/O read %04X\n",
 			cpu6_pc(), addr);
