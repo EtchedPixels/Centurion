@@ -554,6 +554,64 @@ static int memcpy16(void) {
 	return 0;
 }
 
+static void sub_flags(uint8_t r, uint8_t a, uint8_t b);
+
+static int bignum_sub(int a_len, int b_len, uint64_t a_addr, uint16_t b_addr, int write_back) {
+	// b = a - b
+	if (a_len > b_len) {
+		// No idea what it should do here. Trap? overflow and set the FAULT flag?
+		fprintf(stderr, "unsupported SUBBIG at %04X\n", exec_pc);
+		exit(-1);
+	}
+	int a_idx = b_len - a_len; // might be negative
+
+	// For debugging
+	uint64_t result_big = 0;
+	int shift = 0;
+	uint64_t a_big = 0;
+	uint64_t b_big = 0;
+
+	// Roughly the microcode state
+	uint32_t borrow = 0; // Probally just the link flag on real hardware
+	uint8_t zero_acc = 0; // will collect any one bits
+	uint8_t a_val = 0;
+	uint8_t b_val = 0;
+	uint8_t result = 0;
+
+	for (a_len--, b_len--; b_len >= 0; b_len--, a_len--) {
+		if (a_len >= 0) {
+			a_val = mmu_mem_read8(a_addr + a_len);
+		} else {
+			a_val = ((int8_t)a_val) >> 8; // sign extend previous byte
+		}
+		b_val = mmu_mem_read8(b_addr + b_len);
+		a_big |= a_val << shift;
+		b_big |= b_val << shift;
+
+		result = b_val - a_val - borrow;
+		result_big |= result << shift;
+		shift += 8;
+
+		//fprintf(stderr, "%i %i | %02x - %02x - %02x = %04x;", b_len, a_len, b_val, a_val, borrow, result & 0xff);
+
+		zero_acc |= (result != 0);
+		borrow = (a_val > b_val);
+		//fprintf(stderr, " borrow = %x;\n", borrow);
+
+		if (write_back)
+			mmu_mem_write8(b_addr + b_len, result);
+	}
+
+	//fprintf(stderr, "%s %lx - %lx == %lx\n", write_back ? "SUBBIG" : "CMPBIG", b_big, a_big, result_big);
+
+	sub_flags(result | zero_acc, a_val, b_val);
+	alu_out &= ~ALU_L;
+	if (borrow == 0)
+		alu_out |= ALU_L;
+
+	return 0;
+}
+
 /* Various microcode math routines which operate on arbitrary width integers
  *
  *	46 llllkkkk ssssmmnn
@@ -575,8 +633,9 @@ static int bignum_op(void) {
 	unsigned mode = fetch();
 
 	if ((mode >> 4) == 9) {
-		// BASECONV
-		// I have not idea how the actual microcode routine works, so here is an approximation
+		// bignum to Ascii
+		// I have no idea how the actual microcode routine works, so here is an approximation
+		// that works upto 64bits
 		// Doesn't handle cases where buffer hasn't been memset to 0xc0
 		unsigned dest_width = reg_read(AL);
 		unsigned base = a_size + 1;
@@ -613,6 +672,8 @@ static int bignum_op(void) {
 			return 0;
 		}
 
+		alu_out = 0;
+
 		for (int i=0; i<actual_width; i++) {
 			mmu_mem_write8(dst_addr+i, buffer[i] | 0x80);
 		}
@@ -621,8 +682,58 @@ static int bignum_op(void) {
 		regpair_write(A, dst_addr + actual_width);
 		return 0;
 	}
+	if ((mode >> 4) == 8) {
+		// ASCII to bignum
+		// I'm not sure how the actual microcode routine works, so here is an approximation
+		// that works upto 64 bits.
+		unsigned src_width = reg_read(AL);
+
+		if (b_size > 8 || src_width > 31) {
+			fprintf(stderr, "%i byte ascii-to-bignum is too big for our modern 64bit machines\n", b_size);
+			exit(1);
+		}
+
+		uint16_t src_addr = get_twobit(mode, 0, src_width);
+		uint16_t dst_addr = get_twobit(mode, 1, b_size);
+
+		// Copy string out
+		char buffer[32];
+		for (int i=0; i < src_width; i++) {
+			buffer[i] = mmu_mem_read8(src_addr+i) & 0x7f;
+		}
+		buffer[src_width] = '\0';
+
+		char* end_ptr = &buffer[src_width];
+		uint64_t result = strtol(buffer, &end_ptr, a_size + 1);
+
+		if (end_ptr == NULL) {
+			alu_out = ALU_F;
+			return 0;
+		}
+		alu_out = 0;
+
+		// Guessing that this might set some flags?
+		if (result == 0)
+			alu_out |= ALU_V;
+		if (((int64_t)result) < 0)
+			alu_out |= ALU_M;
+
+		for (int i = b_size-1; i >= 0; i--) {
+			mmu_mem_write8(dst_addr + i, result & 0xff);
+			result >>= 8;
+		}
+		return 0;
+	}
+
+	uint16_t a_addr = get_twobit(mode, 0, a_size);
+	uint16_t b_addr = get_twobit(mode, 1, b_size);
+
 
 	switch (mode >> 4) {
+	case 1: // SUBBIG
+		return bignum_sub(a_size, b_size, a_addr, b_addr, 1);
+	case 2: // CMPBIG
+		return bignum_sub(a_size, b_size, a_addr, b_addr, 0);
 	default:
 		fprintf(stderr, "Unsupported 46 Bignum op %i\n", mode >> 4);
 		exit(1);
