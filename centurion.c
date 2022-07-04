@@ -14,7 +14,7 @@
 #include "console.h"
 #include "cpu6.h"
 #include "dma.h"
-#include "hawk.h"
+#include "dsk.h"
 #include "mux.h"
 #include "cbin_load.h"
 
@@ -507,7 +507,7 @@ static uint8_t io_read8(uint16_t addr)
 	if (addr == 0xF110)
 		return switches;
 	if (addr >= 0xF140 && addr <= 0xF14F)
-		return hawk_read(addr, trace & TRACE_DSK);
+		return dsk_read(addr, trace & TRACE_DSK);
 	if (addr >= 0xF200 && addr <= 0xF21F)
 		return mux_read(addr, trace & TRACE_MUX);
 	fprintf(stderr, "%04X: Unknown I/O read %04X\n", cpu6_pc(), addr);
@@ -526,7 +526,7 @@ static void io_write8(uint16_t addr, uint8_t val)
 		hexdisplay(addr, val);
 		return;
 	} else if (addr >= 0xF140 && addr <= 0xF14F) {
-		hawk_write(addr, val, trace & TRACE_DSK);
+		dsk_write(addr, val, trace & TRACE_DSK);
 		return;
 	} else if (addr >= 0xF200 && addr <= 0xF21F) {
 		mux_write(addr, val, trace & TRACE_MUX);
@@ -772,7 +772,7 @@ int main(int argc, char *argv[])
 		load_rom("Diag_F4_1133CMD.BIN", 0x09800, 0x0800);
 	}
 
-	hawk_init();
+	dsk_init();
 	cpu6_init();
 
 	if (boot_file != NULL) {
