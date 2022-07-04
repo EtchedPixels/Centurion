@@ -52,3 +52,4 @@ extern void cpu_assert_irq(unsigned ipl);
 extern void cpu_deassert_irq(unsigned ipl);
 extern void advance_time(uint64_t nanoseconds);
 extern uint64_t get_current_time();
+extern uint16_t cpu6_dma_count(void);

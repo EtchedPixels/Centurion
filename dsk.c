@@ -173,12 +173,16 @@ static void hawk_clear_controller_error() {
  *	 bytes per track"
  *		-- Ken Romain
  */
-static void dsk_seek()
+static void dsk_seek(unsigned trace)
 {
 	unsigned unit = dsk_selected_unit;
 	unsigned sec = dsk_selected_sector & 0x0F;
 	unsigned head = !!(dsk_selected_sector & 0x10);
 	unsigned cyl = dsk_selected_sector >> 5;
+
+	if (trace)
+		fprintf(stderr, "%04x: %i Seek to %u/%u/%u\n", cpu6_pc(), unit,
+			cyl, head, sec);
 
 	if (hawk[unit].ready) {
 		hawk_seek(&hawk[unit], cyl, head, sec);
@@ -267,10 +271,6 @@ void hawk_dma_done(void)
  */
 static void dsk_cmd(uint8_t cmd, unsigned trace)
 {
-	if (trace)
-		fprintf(stderr, "%04X Hawk unit %02X command %02X\n", cpu6_pc(),
-			dsk_selected_unit, cmd);
-
 	// Controller errors appear to be cleared when starting a new command
 	hawk_clear_controller_error();
 
@@ -278,15 +278,25 @@ static void dsk_cmd(uint8_t cmd, unsigned trace)
 
 	switch (cmd) {
 	case 0:		/* Multi sector read  - 1 to 16 sectors */
+		if (trace)
+			fprintf(stderr, "%04X: hawk %i Read %f sectors\n", cpu6_pc(),
+				dsk_selected_unit, cpu6_dma_count() / 400.0);
 		hawk_set_dma(1);
 		break;
 	case 1:		/* Multi sector write - ditto */
+		if (trace)
+			fprintf(stderr, "%04X: hawk %i Write %f sectors\n", cpu6_pc(),
+				dsk_selected_unit, cpu6_dma_count() / 400.0);
         hawk_set_dma(2);
 		break;
 	case 2:		/* Seek */
-		dsk_seek();
+
+		dsk_seek(trace);
 		break;
 	case 3:		/* Return to Track Zero Sector (Recalibrate) */
+		if (trace)
+			fprintf(stderr, "%04X: hawk %i Return to Zero\n", cpu6_pc(),
+				dsk_selected_unit);
 		hawk_rtz(&hawk[dsk_selected_unit]);
 		dsk_busy = 0;
 		break;
