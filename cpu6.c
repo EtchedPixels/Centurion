@@ -98,6 +98,10 @@ uint8_t dma_write_cycle(void)
 	return r;
 }
 
+uint16_t cpu6_dma_count(void) {
+	return ~dma_count;
+}
+
 /*
  *	When packed into C, the flags live in the upper 4 bits of the low byte
  */
