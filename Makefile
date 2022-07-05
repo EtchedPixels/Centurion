@@ -14,9 +14,12 @@ all: centurion
 CFLAGS = -g3 -Wall -pedantic
 
 centurion: centurion.o cpu6.o disassemble.o dsk.o hawk.o math128.o mux.o \
-           cbin.o cbin_load.o $(SYS_OBJS)
+           cbin.o cbin_load.o scheduler.o $(SYS_OBJS)
 
-centurion.o: centurion.c centurion.h console.h cpu6.h disassemble.h dma.h dsk.h math128.o mux.h
+centurion.o: centurion.c centurion.h console.h cpu6.h disassemble.h dma.h \
+            dsk.h math128.o mux.h scheduler.h
+
+scheduler.o: scheduler.c scheduler.h cpu6.h
 
 console.o : console.c console.h mux.h
 
@@ -26,9 +29,9 @@ cpu6.o : cpu6.c cpu6.h
 
 disassemble.o: disassemble.c disassemble.h cpu6.h
 
-dsk.o: dsk.c dsk.h hawk.h dma.h
+dsk.o: dsk.c dsk.h hawk.h dma.h scheduler.h cpu6.h
 
-hawk.o: hawk.c hawk.h
+hawk.o: hawk.c hawk.h scheduler.h
 
 cbin.o: cbin.h
 
@@ -36,7 +39,7 @@ cbin_load.o: cpu6.h cbin.h
 
 math128.o: math128.h
 
-mux.o : centurion.h mux.h console.h cpu6.h
+mux.o : centurion.h mux.h console.h cpu6.h scheduler.h
 
 clean:
 	rm -f centurion *.o *~

@@ -7,6 +7,7 @@
 #include "dma.h"
 #include "dsk.h"
 #include "hawk.h"
+#include "scheduler.h"
 
 #ifndef O_BINARY
 #define O_BINARY 0

@@ -26,8 +26,6 @@
 #define C		12	/* Flags ? */
 #define P		14	/* PC */
 
-#define ONE_SECOND_NS 1000000000.0
-
 extern uint8_t mem_read8(uint32_t addr);
 extern uint8_t mem_read8_debug(uint32_t addr);
 extern uint16_t mem_read16_debug(uint32_t addr);

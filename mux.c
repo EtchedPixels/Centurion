@@ -8,6 +8,7 @@
 #include "console.h"
 #include "cpu6.h"
 #include "mux.h"
+#include "scheduler.h"
 
 struct MuxUnit mux[NUM_MUX_UNITS];
  // 0 disables interrupts
