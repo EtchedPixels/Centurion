@@ -807,6 +807,9 @@ int main(int argc, char *argv[])
 		}
 	}
 
+	throttle_init();
+	throttle_set_speed(1.0);
+
 	while (!emulator_done) {
 		cpu6_execute_one(trace & TRACE_CPU);
 		if (cpu6_halted())
@@ -845,6 +848,8 @@ int main(int argc, char *argv[])
 		}
 		/* Update peripherals state */
 		mux_poll(trace & TRACE_MUX);
+
+		throttle_emulation(cpu_timestamp_ns);
 
 		instruction_count++;
 		if (terminate_at && instruction_count >= terminate_at) {

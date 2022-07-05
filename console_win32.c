@@ -103,3 +103,16 @@ void mux_poll_fds(unsigned trace)
                         mux_set_read_ready(unit, trace);
 	}
 }
+
+
+void throttle_emulation(uint64_t expected_time_ns) {
+        // Unimplemented
+}
+
+void throttle_init() {
+        // Unimplemented
+}
+
+void throttle_set_speed(float speed) {
+        // Unimplemented
+}
