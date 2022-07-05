@@ -1,12 +1,21 @@
 #pragma once
 
 #include <stdint.h>
+#include "scheduler.h"
 
 #define HAWK_NUM_CYLINDERS 406
 #define HAWK_NUM_HEADS 2
 #define HAWK_SECTS_PER_TRK 16 // Configurable, but Centurion used 16
 
-#define HAWK_SECTOR_SIZE 400
+#define HAWK_SECTOR_BYTES 400
+#define HAWK_RAW_TRACK_BITS 62500 // Nominal, according to hawk manual
+#define HAWK_RAW_SECTOR_BITS (HAWK_RAW_TRACK_BITS / HAWK_SECTS_PER_TRK)
+#define HAWK_GAP_BITS 120
+#define HAWK_SYNC_BITS 88
+
+#define HAWK_ROTATION_NS (ONE_MILISECOND_NS * 25.0)
+#define HAWK_BIT_NS (HAWK_ROTATION_NS / HAWK_RAW_TRACK_BITS)
+#define HAWK_SECTOR_NS (HAWK_ROTATION_NS / HAWK_SECTS_PER_TRK)
 
 struct hawk_unit {
 // Output signals
@@ -56,24 +65,44 @@ struct hawk_unit {
 	uint8_t addr_int;
 
 	// Write Protect
-	// From Hawk unit
 	// Either the unit's write protect switch is on, or the controller is
 	// sending a write_inhibit signal to drive
 	uint8_t wprotect;
 
+	// Sector Address
+	// The current sector under head
+	uint8_t sector_addr;
+
 	// Unimplemented output signals from Hawk unit
 	// Some of them probally go in status.
-	//   Index (sector 0 pulse), Sector (one pulse per sector),
-	//   Sector Address (upto 6 bits), Density.
+	//   Index (sector 0 pulse), Sector (one pulse per sector), Density
 	//
 	// // See Page 25 of HAWK_9427_BP11_OCT80.pdf for details
 
+	uint8_t seeking;
+
 	// File handle of image file
 	int fd;
+	unsigned unit_num;
 
 	// current cylinder << 1 | head
 	uint16_t current_track;
+
+	// Wastefully store 1 bit per byte.
+	uint8_t current_track_data[HAWK_RAW_TRACK_BITS];
+
+	uint32_t data_ptr;
+	uint32_t head_pos;
+	uint64_t rotation_offset;
 };
 
-void hawk_seek(struct hawk_unit* unit, unsigned cyl, unsigned head, unsigned sec);
+void hawk_seek(struct hawk_unit* unit, unsigned cyl, unsigned head);
 void hawk_rtz(struct hawk_unit* unit);
+int hawk_remaining_bits(struct hawk_unit* unit, uint64_t time);
+void hawk_read_bits(struct hawk_unit* unit, int count, uint8_t *dest);
+void hawk_rewind(struct hawk_unit* unit, int count); // cheating
+void hawk_wait_sector(struct hawk_unit* unit, unsigned sector);
+void hawk_update(struct hawk_unit* unit, uint64_t now);
+
+// Callback to dsk
+void dsk_hawk_changed(unsigned unit);
