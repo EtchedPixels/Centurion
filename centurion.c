@@ -33,6 +33,7 @@ static uint64_t cpu_timestamp_ns = 0;
 #define TRACE_PARITY	64
 #define TRACE_MUX	128
 #define TRACE_DSK       256
+#define TRACE_SCHEDULER 512
 
 unsigned int trace = 0;
 
@@ -850,7 +851,7 @@ int main(int argc, char *argv[])
 		/* Update peripherals state */
 		mux_poll(trace & TRACE_MUX);
 
-		run_scheduler(cpu_timestamp_ns);
+		run_scheduler(cpu_timestamp_ns, trace & TRACE_SCHEDULER);
 		throttle_emulation(cpu_timestamp_ns);
 
 		instruction_count++;
