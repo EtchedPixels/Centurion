@@ -17,6 +17,7 @@
 #include "dsk.h"
 #include "mux.h"
 #include "cbin_load.h"
+#include "scheduler.h"
 
 static unsigned finch;		/* Finch or original FDC */
 
@@ -849,6 +850,7 @@ int main(int argc, char *argv[])
 		/* Update peripherals state */
 		mux_poll(trace & TRACE_MUX);
 
+		run_scheduler(cpu_timestamp_ns);
 		throttle_emulation(cpu_timestamp_ns);
 
 		instruction_count++;
