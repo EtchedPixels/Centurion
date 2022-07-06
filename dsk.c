@@ -289,8 +289,8 @@ static void dsk_run_state_machine(unsigned trace, int64_t time)
 	do {
 		if (dsk_old_state != dsk_state && trace) {
 			fprintf(stderr, "DSK: state machine moved to %s\n", dsk_state_names[dsk_state]);
-			dsk_old_state = dsk_state;
 		}
+		dsk_old_state = dsk_state;
 
 		switch (dsk_state) {
 		case STATE_SEEK:
