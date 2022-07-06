@@ -1276,6 +1276,46 @@ static uint16_t rlc16(uint16_t a, uint16_t count)
 	return r;
 }
 
+static int mul16(unsigned dsta, unsigned a, unsigned b)
+{
+	uint32_t r = (uint32_t)a * (uint32_t)b;
+	unsigned expected_sign = (a ^ b) & 0x8000;
+	unsigned sign = r & 0x8000;
+
+	mmu_mem_write16(dsta, r & 0xffff);
+
+	// These flags are a total guess
+	alu_out &= ~(ALU_F | ALU_M | ALU_V);
+	if (sign)
+		alu_out |= ALU_M;
+	if ((r & 0xffff) == 0)
+		alu_out |= ALU_V;
+	if (sign != expected_sign || r > 0xffff)
+		alu_out |= ALU_F;
+
+	return 0;
+}
+
+static int div16(unsigned dsta, unsigned a, unsigned b)
+{
+	uint32_t r = (uint32_t)a / (uint32_t)b;
+	unsigned expected_sign = (a ^ b) & 0x8000;
+	unsigned sign = r & 0x8000;
+
+	mmu_mem_write16(dsta, r & 0xffff);
+
+	// These flags are a total guess
+	alu_out &= ~(ALU_F | ALU_M | ALU_V);
+	if (sign)
+		alu_out |= ALU_M;
+	if ((r & 0xffff) == 0)
+		alu_out |= ALU_V;
+	if (sign != expected_sign || r > 0xffff)
+		alu_out |= ALU_F;
+
+	return 0;
+}
+
 static int add16(unsigned dsta, unsigned a, unsigned b)
 {
 	mmu_mem_write16(dsta, a + b);
@@ -2223,6 +2263,51 @@ static int alu5x_op(void)
 	}
 }
 
+static int muldiv_op() {
+
+	unsigned src, dst;
+	uint16_t addr;
+	uint16_t a; // First argument isn't always dst anymore.
+	uint16_t b;
+	uint16_t dsta;
+
+	// This is the same as alu5x
+
+	dst = fetch();
+	src = dst >> 4;
+	b = regpair_read(src & 0x0E);
+	dsta = regpair_addr(dst & 0x0E);
+	a = regpair_read(dst & 0XE);
+	switch(dst & 0x11) {
+	case 0x00: // dst_reg <- src_reg
+		break;
+	case 0x01: // dst_reg <- src_reg OP (direct)
+				// mov takes (direct)
+		addr = fetch16();
+		b = mmu_mem_read16(addr);
+		break;
+	case 0x10: // dst_reg <- src_reg OP literal
+				// mov takes literal
+		b = fetch16();
+		break;
+	case 0x11: // dst_reg <- (src_reg + disp16) OP dst_reg
+				// mov takes (src_reg + disp16)
+		addr = fetch16() + b;
+		b = a;
+		a = mmu_mem_read16(addr);
+		break;
+	}
+
+	switch (op) {
+	case 0x77: // 16bit Multiply
+		return mul16(dsta, a, b);
+	case 0x78: // 16bit Divide
+		return div16(dsta, a, b);
+	}
+	fprintf(stderr, "Unknown MULDIV op %02X at %04X\n", op, exec_pc);
+	exit(1);
+}
+
 /* It's not entirely clear what these instructions are for
  * they set Level 1's AH to 0 and -1
  *
@@ -2333,6 +2418,8 @@ unsigned cpu6_execute_one(unsigned trace)
 		return block_op(0x67);
 	if (op < 0x70)
 		return x_op();
+	if (op == 0x77 || op == 0x78)
+		return muldiv_op();
 	if (op < 0x80)
 		return jump_op();
 	if (op == 0xb6 || op == 0xc6)
