@@ -16,6 +16,7 @@
 #define HAWK_ROTATION_NS (ONE_MILISECOND_NS * 25.0)
 #define HAWK_BIT_NS (HAWK_ROTATION_NS / HAWK_RAW_TRACK_BITS)
 #define HAWK_SECTOR_NS (HAWK_ROTATION_NS / HAWK_SECTS_PER_TRK)
+#define HAWK_SECTOR_PULSE_NS (2000) // Complete guess
 
 struct hawk_unit {
 // Output signals
@@ -69,13 +70,17 @@ struct hawk_unit {
 	// sending a write_inhibit signal to drive
 	uint8_t wprotect;
 
+	// Sector Pulse
+	// high when head is at the start of a sector
+	uint8_t sector_pulse;
+
 	// Sector Address
 	// The current sector under head
 	uint8_t sector_addr;
 
 	// Unimplemented output signals from Hawk unit
 	// Some of them probally go in status.
-	//   Index (sector 0 pulse), Sector (one pulse per sector), Density
+	//   Index (sector 0 pulse), Density
 	//
 	// // See Page 25 of HAWK_9427_BP11_OCT80.pdf for details
 
@@ -100,9 +105,11 @@ void hawk_seek(struct hawk_unit* unit, unsigned cyl, unsigned head);
 void hawk_rtz(struct hawk_unit* unit);
 int hawk_remaining_bits(struct hawk_unit* unit, uint64_t time);
 void hawk_read_bits(struct hawk_unit* unit, int count, uint8_t *dest);
+uint8_t hawk_read_byte(struct hawk_unit* unit);
+uint16_t hawk_read_word(struct hawk_unit* unit);
 void hawk_rewind(struct hawk_unit* unit, int count); // cheating
 void hawk_wait_sector(struct hawk_unit* unit, unsigned sector);
 void hawk_update(struct hawk_unit* unit, int64_t now);
 
 // Callback to dsk
-void dsk_hawk_changed(unsigned unit);
+void dsk_hawk_changed(unsigned unit, int64_t time);

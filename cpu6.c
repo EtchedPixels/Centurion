@@ -102,6 +102,17 @@ uint16_t cpu6_dma_count(void) {
 	return ~dma_count;
 }
 
+void cpu6_dma_write(uint8_t byte) {
+	/* DMA is done when it incs to 0 */
+	if (dma_enable == 0 || ++dma_count == 0) {
+		dma_enable = 0;
+		return;
+	}
+	if (dma_enable) {
+		mem_write8(dma_addr++, byte);
+	}
+}
+
 /*
  *	When packed into C, the flags live in the upper 4 bits of the low byte
  */
