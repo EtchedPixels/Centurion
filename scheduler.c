@@ -18,16 +18,21 @@ static void update_next_event()
 
 void schedule_event(struct event_t *event)
 {
-    uint64_t now = get_current_time();
+    int64_t now = get_current_time();
     int64_t scheduled = get_current_time() + event->delta_ns;
-    assert(scheduled >= now);
 
     if (trace_schedule) {
         long now_seconds = now / ONE_SECOND_NS;
         long now_us = (now % (int64_t)ONE_SECOND_NS) / ONE_MICROSECOND_NS;
         double delta = (double)event->delta_ns / ONE_MICROSECOND_NS;
-        fprintf(stderr, "%li.%06li: Scheduling %s in %.3f us\n",
-            now_seconds, now_us, event->name, delta);
+
+        if (scheduled <= now) {
+            fprintf(stderr, "%li.%06li: Scheduling %s immediately\n",
+                now_seconds, now_us, event->name);
+        } else {
+            fprintf(stderr, "%li.%06li: Scheduling %s in %.3f us\n",
+                now_seconds, now_us, event->name, delta);
+        }
     }
 
     if (event->next != NULL) {
@@ -62,7 +67,7 @@ void run_scheduler(uint64_t current_time, unsigned trace)
     while (next_event <= current_time) {
         // Pop event
         struct event_t* event = event_list;
-        event_list = event_list->next;
+        event_list = event->next;
         event->next = NULL;
         update_next_event();
 
@@ -104,4 +109,11 @@ void cancel_event(struct event_t *event)
         }
         next_ptr = &next->next;
     }
+}
+
+int64_t scheduler_next()
+{
+    if (event_list == NULL)
+        return -1;
+    return next_event;
 }

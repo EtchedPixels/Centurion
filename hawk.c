@@ -184,8 +184,8 @@ static void hawk_rotation_event_cb(struct event_t* event, int64_t late_ns)
 
     struct hawk_unit* unit = rotation_event.unit;
 
-    uint64_t now = get_current_time();
-    hawk_update(unit, now);
+    int64_t time = get_current_time() - late_ns;
+    hawk_update(unit, time);
 
      // Copy current head position to read/write pointer
     unit->data_ptr = unit->head_pos;
@@ -194,9 +194,9 @@ static void hawk_rotation_event_cb(struct event_t* event, int64_t late_ns)
 }
 
 void hawk_wait_sector(struct hawk_unit* unit, unsigned sector) {
-    uint64_t now = get_current_time();
-    uint64_t rotation = (now + unit->rotation_offset) % (uint64_t)HAWK_ROTATION_NS;
-    uint64_t desired_rotation = HAWK_SECTOR_NS * sector;
+    int64_t now = get_current_time();
+    int64_t rotation = (now + unit->rotation_offset) % (uint64_t)HAWK_ROTATION_NS;
+    int64_t desired_rotation = HAWK_SECTOR_NS * sector;
 
     int64_t delta = desired_rotation - rotation;
     if (delta < 0)

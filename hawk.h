@@ -102,7 +102,7 @@ int hawk_remaining_bits(struct hawk_unit* unit, uint64_t time);
 void hawk_read_bits(struct hawk_unit* unit, int count, uint8_t *dest);
 void hawk_rewind(struct hawk_unit* unit, int count); // cheating
 void hawk_wait_sector(struct hawk_unit* unit, unsigned sector);
-void hawk_update(struct hawk_unit* unit, uint64_t now);
+void hawk_update(struct hawk_unit* unit, int64_t now);
 
 // Callback to dsk
 void dsk_hawk_changed(unsigned unit);
