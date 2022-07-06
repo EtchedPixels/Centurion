@@ -2363,9 +2363,9 @@ void cpu_deassert_irq(unsigned ipl) {
 
 unsigned cpu6_execute_one(unsigned trace)
 {
+	cpu6_interrupt(trace);
 	exec_pc = pc;
 
-	cpu6_interrupt(trace);
 	if (trace)
 		fprintf(stderr, "CPU %04X: ", pc);
 	op = fetch();
