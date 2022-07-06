@@ -18,11 +18,47 @@ struct seek_event_t {
 
 static void hawk_seek_callback(struct event_t* event, int64_t late_ns);
 
-static struct seek_event_t seek_event = {
+static struct seek_event_t seek_event[8] = {{
     .event = {
-        .name = "hawk_seek",
+        .name = "hawk0_seek",
         .callback = hawk_seek_callback,
     }
+},{
+    .event = {
+        .name = "hawk1_seek",
+        .callback = hawk_seek_callback,
+    }
+},{
+    .event = {
+        .name = "hawk2_seek",
+        .callback = hawk_seek_callback,
+    }
+},{
+    .event = {
+        .name = "hawk3_seek",
+        .callback = hawk_seek_callback,
+    }
+},{
+    .event = {
+        .name = "hawk4_seek",
+        .callback = hawk_seek_callback,
+    }
+},{
+    .event = {
+        .name = "hawk5_seek",
+        .callback = hawk_seek_callback,
+    }
+},{
+    .event = {
+        .name = "hawk6_seek",
+        .callback = hawk_seek_callback,
+    }
+},{
+    .event = {
+        .name = "hawk7_seek",
+        .callback = hawk_seek_callback,
+    }
+}
 };
 
 struct rotation_event_t {
@@ -42,13 +78,10 @@ static struct rotation_event_t rotation_event = {
 
 static void hawk_seek_callback(struct event_t* event, int64_t late_ns)
 {
-    fprintf(stderr, "hawk_seek_callback\n");
-    assert(event == &seek_event.event);
-    struct hawk_unit* unit = seek_event.unit;
+    struct seek_event_t* e = (struct seek_event_t*)event;
+    struct hawk_unit* unit = e->unit;
 
-    if (seek_event.seek_error) {
-        unit->seek_error = seek_event.seek_error;
-    }
+    unit->seek_error = e->seek_error;
 
     // It's more of seek-complete than actually on_cyl.
     // Forced to zero as soon as a seek begins.
@@ -150,10 +183,11 @@ void hawk_seek(struct hawk_unit* unit, unsigned cyl, unsigned head)
 
     // According to specs, the average track-to-track seek time is 7.5ms.
     // TODO: Accurate seek times
-    seek_event.event.delta_ns = 7.5 * ONE_MILISECOND_NS;
-    seek_event.event.callback = hawk_seek_callback;
-    seek_event.unit = unit;
-    seek_event.seek_error = 0;
+    struct seek_event_t* e = &seek_event[unit->unit_num];
+    e->event.delta_ns = 7.5 * ONE_MILISECOND_NS;
+    e->event.callback = hawk_seek_callback;
+    e->unit = unit;
+    e->seek_error = 0;
 
     // To simplify emulation, slurp the whole track into host memory
     if (!hawk_buffer_track(unit, cyl, head)) {
@@ -162,12 +196,12 @@ void hawk_seek(struct hawk_unit* unit, unsigned cyl, unsigned head)
         // after initiation of CA Strobe or RTZ
 
         // we will emulate our IO error as 500ms timeout
-        seek_event.seek_error = 1;
-        seek_event.event.delta_ns = 500 * ONE_MILISECOND_NS;
+        e->seek_error = 1;
+        e->event.delta_ns = 500 * ONE_MILISECOND_NS;
     }
 
     unit->addr_ack = 1;
-    schedule_event(&seek_event.event);
+    schedule_event(&e->event);
 }
 
 
