@@ -1652,7 +1652,9 @@ static int low_op(void)
 			new_pc = regpair_read(X);
 			{
 				uint8_t byte = popbyte();
-				alu_out = byte & (ALU_L | ALU_F | ALU_M | ALU_V);
+				// JSYS might have saved the flags, but RSYS doesn't restore them
+				// Syscalls sometimes return results as flags
+
 				/* We flip MMU context after all the POP cases */
 				cpu_mmu = byte & 0x07;
 			}
