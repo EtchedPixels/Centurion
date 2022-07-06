@@ -54,6 +54,7 @@ static uint8_t  dsk_head;
 static uint8_t  dsk_sector;
 
 static unsigned dsk_interrupt_enabled;
+static unsigned dsk_interrupt_ack;
 static uint16_t dsk_status;
 
 static unsigned dsk_tracing;
@@ -116,6 +117,7 @@ enum dsk_state_t {
 	STATE_READ_DATA,
 	STATE_CRC,
 	STATE_IDLE,
+	STATE_FINISH,
 };
 
 static const char *dsk_state_names[] = {
@@ -130,6 +132,7 @@ static const char *dsk_state_names[] = {
 	"READ_DATA",
 	"CRC",
 	"IDLE",
+	"FINISH",
 };
 
 static enum dsk_state_t dsk_state = STATE_IDLE;
@@ -143,7 +146,7 @@ static void dsk_reschedule(int64_t delta_ns)
 }
 
 static void dsk_goto_idle() {
-	dsk_state = STATE_IDLE;
+	dsk_state = STATE_FINISH;
 	cancel_event(&dsk_timeout_evt);
 	hawk_set_dma(0);
 
@@ -236,10 +239,10 @@ static void dsk_read_data(int64_t time)
 	while (remaining >= 8) {
 		uint8_t data = hawk_read_byte(unit);
 		cpu6_dma_write(data);
-		// fprintf(stderr, "%02x ", data);
-		// if (dsk_transfer_count % 16 == 1) {
-		// 	fprintf(stderr, "\n");
-		// }
+		fprintf(stderr, "%02x ", data);
+		if (dsk_transfer_count % 16 == 1) {
+			fprintf(stderr, "\n");
+		}
 		remaining -= 8;
 		if (--dsk_transfer_count == 0) {
 			dsk_state = STATE_CRC;
@@ -349,13 +352,27 @@ static void dsk_run_state_machine(unsigned trace, int64_t time)
 			//
 			dsk_do_crc(time);
 			break;
-		case STATE_IDLE:
-			if (dsk_interrupt_enabled) {
+		case STATE_FINISH:
+			// Guess: If interrupts are enabled, we stay here until the
+			// interrupt is cleared.
+			if (dsk_interrupt_enabled && !dsk_interrupt_ack) {
 				cpu_assert_irq(dsk_irq);
+				if (trace)
+					fprintf(stderr, "DSK: interrupt asserted\n");
+			} else if (dsk_interrupt_ack) {
+				if (trace)
+					fprintf(stderr, "DSK: interrupt acked\n");
+				dsk_interrupt_ack = 0;
+				cpu_deassert_irq(dsk_irq);
+				dsk_state = STATE_IDLE;
+			} else {
+				dsk_state = STATE_IDLE;
 			}
+		case STATE_IDLE:
 			break;
 		}
 
+		dsk_interrupt_ack = 0;
 
 		// Testing on real hardware suggests status register is latched to only
 		// update on state machine change
@@ -381,7 +398,7 @@ static void dsk_timeout_cb(struct event_t* event, int64_t late_ns)
 	hawk_set_dma(0);
 
 	dsk_timeout = 1;
-	dsk_state = STATE_IDLE;
+	dsk_goto_idle();
 }
 
 void dsk_hawk_changed(unsigned unit, int64_t time)
@@ -419,6 +436,10 @@ void dsk_init(void)
 
 			// Hawk units automatically RTZ when first coming online
 			hawk_rtz(&hawk[i]);
+
+			// Hack: I don't think this happens on real hardware, but this
+			//       allows us to skip WIPL and start with LOAD
+			dsk_seek_active |= 1 << (i / 2);
 		}
 	}
 }
@@ -526,8 +547,7 @@ static void dsk_cmd(uint8_t cmd, unsigned trace)
 {
 	if (dsk_state != STATE_IDLE) {
 		if (trace)
-			fprintf(stderr, "dsk_cmd: dsk_state != STATE_IDLE\n");
-		return;
+			fprintf(stderr, "%04X: statemachine busy. cmd=%i\n", cpu6_pc(), cmd);
 	}
 
 	schedule_event(&dsk_timeout_evt);
@@ -538,15 +558,15 @@ static void dsk_cmd(uint8_t cmd, unsigned trace)
 	switch (cmd) {
 	case 0:		/* Multi sector read  - 1 to 16 sectors */
 		if (trace)
-			fprintf(stderr, "%04X: hawk %i Read %f sectors\n", cpu6_pc(),
-				dsk_selected_unit, cpu6_dma_count() / 400.0);
+			fprintf(stderr, "%04X: hawk %i Read %i bytes\n", cpu6_pc(),
+				dsk_selected_unit, cpu6_dma_count());
 		dsk_transfer_mode = 1;
 		dsk_state = STATE_START;
 		break;
 	case 1:		/* Multi sector write - ditto */
 		if (trace)
-			fprintf(stderr, "%04X: hawk %i Write %f sectors\n", cpu6_pc(),
-				dsk_selected_unit, cpu6_dma_count() / 400.0);
+			fprintf(stderr, "%04X: hawk %i Write %i bytes\n", cpu6_pc(),
+				dsk_selected_unit, cpu6_dma_count());
 		dsk_transfer_mode = 2;
         dsk_state = STATE_START;
 		break;
@@ -572,8 +592,10 @@ void dsk_write(uint16_t addr, uint8_t val, unsigned trace)
 	switch (addr) {
 	case 0xF140:
 		dsk_selected_unit = val;
+		// guess, selecting unit updates status
+		dsk_update_status();
 		if (trace)
-			fprintf(stderr, "Selected hawk unit %i\n", val);
+			fprintf(stderr, "Selected hawk unit %i. %i%i\n", val, hawk[val].on_cyl, hawk[val].ready);
 		break;
 	case 0xF141:
 		// bits are xxCC_CCCC_CCCH_SSSS
@@ -612,18 +634,29 @@ void dsk_write(uint16_t addr, uint8_t val, unsigned trace)
 		break;
 	case 0xF14C:
 		// Strobe. This seems to force an interrupt.
-		// Guess, it's forcing the state machine to DONE which will trigger
-		// an interrupt if enabled.
-		dsk_state = STATE_IDLE;
+		// Guess, it's forcing the state machine to FINISH which will trigger
+		// an interrupt if interrupts are enabled.
+		if (trace)
+			fprintf(stderr, "%04X: hawk %i Force Interrupt\n", cpu6_pc(), dsk_selected_unit);
+		dsk_state = STATE_FINISH;
+		break;
+	case 0xF14D:
+		// Disable interrupts.
+		if (trace)
+			fprintf(stderr, "%04X: hawk %i Disable Interrupts\n", cpu6_pc(), dsk_selected_unit);
+		dsk_interrupt_enabled = 0;
 		break;
 	case 0xF14E:
-		// Strobe. Enable interrupt on DONE
+		// Strobe. Enable interrupt on FINISH
+		if (trace)
+			fprintf(stderr, "%04X: hawk %i Enable Interrupt\n", cpu6_pc(), dsk_selected_unit);
 		dsk_interrupt_enabled = 1;
 		break;
 	case 0xF14F:
 		// Strobe. Acknowledge interrupt
-		dsk_interrupt_enabled = 0;
-		cpu_deassert_irq(dsk_irq);
+		if (trace)
+			fprintf(stderr, "%04X: hawk %i Acknowledge Interrupt\n", cpu6_pc(), dsk_selected_unit);
+		dsk_interrupt_ack = 1;
 		break;
 	default:
 		fprintf(stderr,
@@ -657,13 +690,13 @@ uint8_t dsk_read(uint16_t addr, unsigned trace)
 		return (dsk_cylinder << 5) | (dsk_head << 4) | hawk[dsk_selected_unit].sector_addr;
 	case 0xF144:
 		status = dsk_status >> 8;
-		// if (trace)
-		// 	fprintf(stderr, "%04X: hawk status read high | %02x__\n", cpu6_pc(), status);
+		if (trace)
+		 	fprintf(stderr, "%04X: hawk status read high | %02x__\n", cpu6_pc(), status);
 		return status;
 	case 0xF145:
 		status = dsk_status & 0xff;
-		// if (trace)
-		// 	fprintf(stderr, "%04X: hawk status read low  | __%02x\n", cpu6_pc(), status);
+		if (trace)
+		 	fprintf(stderr, "%04X: hawk status read low  | __%02x\n", cpu6_pc(), status);
 		return status ;
 	case 0xF148:		/* Bit 0 seems to be set while it is processing */
 		return dsk_state != STATE_IDLE;
