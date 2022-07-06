@@ -547,7 +547,7 @@ static int block_op(int inst)
 		return 0;
 	default:
 		fprintf(stderr, "%04X: Unknown block xfer %02X\n", cpu6_pc(), op);
-		return 0;
+		exit(1);
 	}
 }
 
@@ -1447,6 +1447,7 @@ static uint16_t decode_address(unsigned size, unsigned mode)
 	case 7:
 		fprintf(stderr, "unknown address indexing %X at %04X\n",
 			mode, exec_pc);
+		exit(1);
 		break;
 	default:
 		/* indexed off a register */
@@ -1727,6 +1728,7 @@ static int dma_op(void)
 	default:
 		fprintf(stderr, "Unknown DMA operations 2F%02X at %04X\n",
 			op, exec_pc);
+		exit(1);
 		break;
 	}
 	return 0;
@@ -2163,6 +2165,7 @@ static int alu4x_op(void)
 	case 0x4F:		/* unused */
 		fprintf(stderr, "Unknown ALU4 op %02X at %04X\n", op,
 			exec_pc);
+		exit(1);
 		return 0;
 	default:
 		fprintf(stderr, "internal error alu4\n");
@@ -2239,6 +2242,7 @@ static int alu5x_op(void)
 	case 0x57:		/* unused */
 		fprintf(stderr, "Unknown ALU5 op %02X at %04X\n", op,
 			exec_pc);
+		exit(1);
 		return 0;
 	case 0x58:
 		return add16(dsta, a, b);
