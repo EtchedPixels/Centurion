@@ -153,7 +153,7 @@ static void dsk_goto_idle() {
 	dsk_reschedule(0); // Immediately
 }
 
-static void dsk_check_sync(enum dsk_state_t success_state, int64_t time)
+static void dsk_check_sync(enum dsk_state_t success_state, int64_t time, unsigned trace)
 {
 	struct hawk_unit* unit = &hawk[dsk_selected_unit];
 	int remaining = hawk_remaining_bits(unit, time);
@@ -186,7 +186,8 @@ static void dsk_check_sync(enum dsk_state_t success_state, int64_t time)
 			rewind_count++;
 
 		}
-		fprintf(stderr, "Sync after %i zeros. Rewind %d bits\n", dsk_sync_count, rewind_count);
+		if (trace)
+		    fprintf(stderr, "Sync after %i zeros. Rewind %d bits\n", dsk_sync_count, rewind_count);
 		// if we read too much, rewind to simplify our code
 		hawk_rewind(unit, rewind_count);
 
@@ -231,7 +232,7 @@ static void dsk_verify_addr(int64_t time)
 	dsk_state = STATE_DATA_SYNC;
 }
 
-static void dsk_read_data(int64_t time)
+static void dsk_read_data(int64_t time, unsigned trace)
 {
 	struct hawk_unit* unit = &hawk[dsk_selected_unit];
 	int remaining = hawk_remaining_bits(unit, time);
@@ -239,9 +240,11 @@ static void dsk_read_data(int64_t time)
 	while (remaining >= 8) {
 		uint8_t data = hawk_read_byte(unit);
 		cpu6_dma_write(data);
-		fprintf(stderr, "%02x ", data);
-		if (dsk_transfer_count % 16 == 1) {
-			fprintf(stderr, "\n");
+		if (trace) {
+			fprintf(stderr, "%02x ", data);
+			if (dsk_transfer_count % 16 == 1) {
+				fprintf(stderr, "\n");
+			}
 		}
 		remaining -= 8;
 		if (--dsk_transfer_count == 0) {
@@ -331,7 +334,7 @@ static void dsk_run_state_machine(unsigned trace, int64_t time)
 			break;
 		case STATE_ADDR_SYNC:
 			// wait for a sync
-			dsk_check_sync(STATE_CHECK_ADDR, time);
+			dsk_check_sync(STATE_CHECK_ADDR, time, trace);
 			break;
 		case STATE_CHECK_ADDR:
 			dsk_verify_addr(time);
@@ -341,12 +344,12 @@ static void dsk_run_state_machine(unsigned trace, int64_t time)
 			// guess: In order to allow enough time for the current instruction to finish
 			//        DSK requests a DMA lock as soon as it starts looking for sync
 			hawk_set_dma(dsk_transfer_mode);
-			dsk_check_sync(STATE_READ_DATA, time);
+			dsk_check_sync(STATE_READ_DATA, time, trace);
 			dsk_transfer_count = HAWK_SECTOR_BYTES;
 			break;
 		case STATE_READ_DATA:
 			// read data
-			dsk_read_data(time);
+			dsk_read_data(time, trace);
 			break;
 		case STATE_CRC:
 			//
