@@ -104,12 +104,14 @@ uint16_t cpu6_dma_count(void) {
 
 void cpu6_dma_write(uint8_t byte) {
 	/* DMA is done when it incs to 0 */
-	if (dma_enable == 0 || ++dma_count == 0) {
-		dma_enable = 0;
+	if (dma_enable == 0) {
 		return;
 	}
 	if (dma_enable) {
 		mem_write8(dma_addr++, byte);
+	}
+	if (++dma_count == 0xffff) {
+		dma_enable = 0;
 	}
 }
 
