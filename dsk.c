@@ -1,3 +1,4 @@
+#include <assert.h>
 #include <fcntl.h>
 #include <stdio.h>
 #include <string.h>
@@ -48,20 +49,32 @@ static uint8_t dsk_irq = 2;
 // F140 selected unit
 static uint8_t dsk_selected_unit;
 
-// F141/F142 selected sector
-// bits are xxCC_CCCC_CCCH_SSSS
-static uint16_t dsk_selected_sector;
+static uint16_t dsk_cylinder;
+static uint8_t  dsk_head;
+static uint8_t  dsk_sector;
 
 static unsigned dsk_interrupt_enabled;
 static uint16_t dsk_status;
 
 static unsigned dsk_tracing;
-static unsigned dsk_sync_count;
+static unsigned dsk_sync_count; // Number of zero bits seen during sync
+static unsigned dsk_transfer_mode; // 1=read, 0=write
 
+static unsigned dsk_transfer_count; // number of bytes transferred during current sector
 
-// Busy
-// Controller State machine is processing a command
-static uint8_t dsk_busy;
+static void dsk_timeout_cb(struct event_t* event, int64_t late_ns);
+static struct event_t dsk_timeout_evt = {
+	.name = "dsk_timeout",
+	.delta_ns = 100 * ONE_MILISECOND_NS,
+	.callback = dsk_timeout_cb
+};
+
+static void dsk_runstate_cb(struct event_t* event, int64_t late_ns);
+static struct event_t dsk_runstate_evt = {
+	.name = "dsk_runstate",
+	.delta_ns = 0,
+	.callback = dsk_runstate_cb
+};
 
 // Format Error
 // Controller couldn't find the sync pattern before address or data.
@@ -98,12 +111,11 @@ enum dsk_state_t {
 	STATE_START, // read or write
 	STATE_WAIT_SECTOR,
 	STATE_ADDR_SYNC,
-	STATE_READ_ADDR,
 	STATE_CHECK_ADDR,
 	STATE_DATA_SYNC,
 	STATE_READ_DATA,
+	STATE_CRC,
 	STATE_IDLE,
-	STATE_DONE,
 };
 
 static const char *dsk_state_names[] = {
@@ -113,117 +125,267 @@ static const char *dsk_state_names[] = {
 	"START",
 	"WAIT_SECTOR",
 	"ADDR_SYNC",
-	"READ_ADDR",
 	"CHECK_ADDR",
 	"DATA_SYNC",
 	"READ_DATA",
+	"CRC",
 	"IDLE",
-	"DONE",
 };
 
 static enum dsk_state_t dsk_state = STATE_IDLE;
 static enum dsk_state_t dsk_old_state = STATE_IDLE;
 
-static unsigned dsk_check_sync() {
-	struct hawk_unit* unit = &hawk[dsk_selected_unit];
-	uint64_t time = get_current_time();
 
-	while (hawk_remaining_bits(unit, time) > 8) {
-		uint8_t data;
-		hawk_read_bits(unit, 8, &data);
+static void dsk_reschedule(int64_t delta_ns)
+{
+	dsk_runstate_evt.delta_ns = delta_ns;
+	schedule_event(&dsk_runstate_evt);
+}
+
+static void dsk_goto_idle() {
+	dsk_state = STATE_IDLE;
+	cancel_event(&dsk_timeout_evt);
+	hawk_set_dma(0);
+
+	dsk_reschedule(0); // Immediately
+}
+
+static void dsk_check_sync(enum dsk_state_t success_state, int64_t time)
+{
+	struct hawk_unit* unit = &hawk[dsk_selected_unit];
+	int remaining = hawk_remaining_bits(unit, time);
+
+	// At some threshold, the state-machine has seen enough zero bits
+	// Guess, threshold is ~60 bits
+	const int sync_threshold = 60;
+
+	// if (remaining < (sync_threshold - dsk_sync_count)) {
+	// 	dsk_reschedule(HAWK_BIT_NS * (remaining - (sync_threshold - dsk_sync_count)) + HAWK_BIT_NS);
+	// 	return;
+	// }
+
+	// Do this in chunks of 8 bits, for better performance
+	while (remaining > 8) {
+		uint8_t data = hawk_read_byte(unit);
+		remaining -= 8;
+
 		if (data == 0) {
 			dsk_sync_count += 8;
-		} else if (dsk_sync_count > 60) {
-			// At some threshold, the state-machine has seen enough bits
-			hawk_rewind(unit, __builtin_clz(data));
-			return 1;
+			continue;
+		}
+
+		dsk_sync_count += 8;
+		unsigned rewind_count = 0;
+
+		while (data != 1) {
+			data >>= 1;
+			dsk_sync_count--;
+			rewind_count++;
+
+		}
+		fprintf(stderr, "Sync after %i zeros. Rewind %d bits\n", dsk_sync_count, rewind_count);
+		// if we read too much, rewind to simplify our code
+		hawk_rewind(unit, rewind_count);
+
+		if (dsk_sync_count > 60) {
+			dsk_state = success_state;
+			return;
+		} else {
+			// We saw a 1 bit too early. Format Error
+			dsk_fmt_err = 1;
+			dsk_goto_idle();
+			return;
 		}
 	}
-	return 0;
+
+	dsk_reschedule(HAWK_BIT_NS * (16 - remaining));
+	return;
 }
 
-static void dsk_run_state_machine(unsigned trace)
+static void dsk_verify_addr(int64_t time)
+{
+	struct hawk_unit* unit = &hawk[dsk_selected_unit];
+
+	int remaining = hawk_remaining_bits(unit, time);
+
+	if (remaining < 32) {
+		dsk_reschedule(HAWK_BIT_NS * (32 - remaining));
+		return;
+	}
+
+	uint16_t expected = (dsk_cylinder << 5) | (dsk_head << 4) | dsk_sector;
+	uint16_t addr = hawk_read_word(unit);
+	// Guess: checkword is just inverted addrs
+	uint16_t checkword = ~hawk_read_word(unit);
+
+	if (addr != expected || checkword != expected) {
+		fprintf(stderr, "Addr error: %04hx != %04hx || %04hx != %04hx\n", addr, expected, checkword, expected);
+		dsk_addr_err = 1;
+		dsk_goto_idle();
+		return;
+	}
+
+	dsk_state = STATE_DATA_SYNC;
+}
+
+static void dsk_read_data(int64_t time)
+{
+	struct hawk_unit* unit = &hawk[dsk_selected_unit];
+	int remaining = hawk_remaining_bits(unit, time);
+
+	while (remaining >= 8) {
+		uint8_t data = hawk_read_byte(unit);
+		cpu6_dma_write(data);
+		// fprintf(stderr, "%02x ", data);
+		// if (dsk_transfer_count % 16 == 1) {
+		// 	fprintf(stderr, "\n");
+		// }
+		remaining -= 8;
+		if (--dsk_transfer_count == 0) {
+			dsk_state = STATE_CRC;
+			return;
+		}
+	}
+	if (remaining == 0)
+		remaining = 8;
+	dsk_reschedule(HAWK_BIT_NS * remaining);
+}
+
+static void dsk_do_crc(int64_t time)
+{
+	struct hawk_unit* unit = &hawk[dsk_selected_unit];
+	int remaining = hawk_remaining_bits(unit, time);
+
+	if (remaining < 16) {
+		dsk_reschedule(HAWK_BIT_NS * (16 - remaining));
+		return;
+	}
+
+	if (dsk_transfer_mode == 1) {
+		uint16_t crc = hawk_read_word(unit);
+		// TODO: Proper CRC function
+		if (crc != 0xcccc) {
+			fprintf(stderr, "DSK: CRC error. Got 0x%04x\n", crc);
+			dsk_crc_error = 1;
+			dsk_goto_idle();
+		} else {
+			dsk_sector = (dsk_sector + 1) & 0xf;
+			hawk_wait_sector(unit, dsk_sector);
+			dsk_state = STATE_WAIT_SECTOR;
+		}
+	} else {
+		fprintf(stderr, "DISK unimplemented transfer mode %d\n", dsk_transfer_mode);
+	}
+}
+
+static void dsk_run_state_machine(unsigned trace, int64_t time)
 {
 	unsigned unit = dsk_selected_unit;
-	uint64_t reschedule_ns = 0;
-
-	if (dsk_old_state != dsk_state && trace) {
-		fprintf(stderr, "DSK: state machine moved to %s\n", dsk_state_names[dsk_state]);
-		dsk_old_state = dsk_state;
-	}
-
-	switch (dsk_state) {
-	case STATE_SEEK:
-		// Start a sync
-		dsk_seek(trace);
-		if (hawk[unit].addr_ack) {
-			dsk_state = STATE_WAIT_SEEK;
-			dsk_seek_active |= 1 << (unit / 2);
-		}
-		break;
-	case STATE_RTZ:
-		// start a rtz
-		hawk_rtz(&hawk[unit]);
-		if (hawk[unit].addr_ack) {
-			dsk_state = STATE_WAIT_SEEK;
-		}
-		break;
-	case STATE_WAIT_SEEK:
-		// Wait until all active seeks/RTZs are complete
-		if (dsk_seek_active == 0) {
-			dsk_busy = 0;
-			dsk_state = STATE_IDLE;
-		}
-		break;
-	case STATE_START:
-		// Start of a read or write
-		hawk_wait_sector(&hawk[unit], dsk_selected_sector & 0xf);
-		dsk_state = STATE_WAIT_SECTOR;
-		break;
-	case STATE_WAIT_SECTOR:
-		// wait for the sector
-		if (hawk[unit].sector_addr == (dsk_selected_sector & 0xf)) {
-			dsk_state = STATE_ADDR_SYNC;
-			dsk_sync_count = 0;
-		} else {
-			fprintf("DSK: sector mismatch %hx %x\n", hawk[unit].sector_addr, dsk_selected_sector & 0xf);
-		}
-		break;
-	case STATE_ADDR_SYNC:
-		// wait for a sync
-		if(dsk_check_sync()) {
-			dsk_state = STATE_READ_ADDR;
-		} else {
-			reschedule_ns = 4000;
-		}
-		break;
-	case STATE_DONE:
-		dsk_busy = 0;
-		dsk_state = STATE_IDLE;
-		break;
-	case STATE_IDLE:
-		if (dsk_interrupt_enabled) {
-			cpu_assert_irq(dsk_irq);
-		}
-		reschedule_ns = 0;
-		break;
-	}
-
 	dsk_tracing = trace;
 
-	// Testing on real hardware suggests status register is latched to only
-	// update on state machine change
-	dsk_update_status();
+	do {
+		if (dsk_old_state != dsk_state && trace) {
+			fprintf(stderr, "DSK: state machine moved to %s\n", dsk_state_names[dsk_state]);
+			dsk_old_state = dsk_state;
+		}
 
-	if (dsk_old_state != dsk_state && trace) {
-		fprintf(stderr, "DSK: state machine moved to %s\n", dsk_state_names[dsk_state]);
-		dsk_old_state = dsk_state;
-	}
+		switch (dsk_state) {
+		case STATE_SEEK:
+			// Start a sync
+			dsk_seek(trace);
+			if (hawk[unit].addr_ack) {
+				dsk_state = STATE_WAIT_SEEK;
+				dsk_seek_active |= 1 << (unit / 2);
+			}
+			break;
+		case STATE_RTZ:
+			// start a rtz
+			hawk_rtz(&hawk[unit]);
+			if (hawk[unit].addr_ack) {
+				dsk_seek_active |= 1 << (unit / 2);
+				dsk_state = STATE_WAIT_SEEK;
+			}
+			break;
+		case STATE_WAIT_SEEK:
+			// Wait until all active seeks/RTZs are complete
+			if (dsk_seek_active == 0) {
+				dsk_goto_idle();
+			}
+			break;
+
+		case STATE_START:
+			// Start of a read or write
+			hawk_wait_sector(&hawk[unit], dsk_sector);
+			dsk_state = STATE_WAIT_SECTOR;
+			break;
+		case STATE_WAIT_SECTOR:
+			// wait for the sector
+			hawk_update(&hawk[unit], time);
+			if (hawk[unit].sector_pulse && hawk[unit].sector_addr == dsk_sector) {
+				dsk_state = STATE_ADDR_SYNC;
+				dsk_sync_count = 0;
+			}
+			break;
+		case STATE_ADDR_SYNC:
+			// wait for a sync
+			dsk_check_sync(STATE_CHECK_ADDR, time);
+			break;
+		case STATE_CHECK_ADDR:
+			dsk_verify_addr(time);
+			break;
+		case STATE_DATA_SYNC:
+			// wait for a sync
+			// guess: In order to allow enough time for the current instruction to finish
+			//        DSK requests a DMA lock as soon as it starts looking for sync
+			hawk_set_dma(dsk_transfer_mode);
+			dsk_check_sync(STATE_READ_DATA, time);
+			dsk_transfer_count = HAWK_SECTOR_BYTES;
+			break;
+		case STATE_READ_DATA:
+			// read data
+			dsk_read_data(time);
+			break;
+		case STATE_CRC:
+			//
+			dsk_do_crc(time);
+			break;
+		case STATE_IDLE:
+			if (dsk_interrupt_enabled) {
+				cpu_assert_irq(dsk_irq);
+			}
+			break;
+		}
+
+
+		// Testing on real hardware suggests status register is latched to only
+		// update on state machine change
+		dsk_update_status();
+
+	} while (dsk_state != dsk_old_state);
 }
 
-void dsk_hawk_changed(unsigned unit)
+static void dsk_runstate_cb(struct event_t* event, int64_t late_ns)
 {
-	printf("DSK: unit %u changed\n", unit);
+	int64_t time = get_current_time() - late_ns;
+	dsk_run_state_machine(dsk_tracing, time);
+}
+
+static void dsk_timeout_cb(struct event_t* event, int64_t late_ns)
+{
+	if (dsk_tracing) {
+		fprintf(stderr, "DSK: timeout in state %s\n",
+			dsk_state_names[dsk_state]);
+	}
+
+	// Kill any outstanding DMA transfers
+	hawk_set_dma(0);
+
+	dsk_timeout = 1;
+	dsk_state = STATE_IDLE;
+}
+
+void dsk_hawk_changed(unsigned unit, int64_t time)
+{
 	if (hawk[unit].on_cyl) {
 		unsigned drive_bit = 1 << (unit >> 1);
 
@@ -233,7 +395,7 @@ void dsk_hawk_changed(unsigned unit)
 		}
 	}
 
-	dsk_run_state_machine(dsk_tracing);
+	dsk_run_state_machine(dsk_tracing, time);
 }
 
 void dsk_init(void)
@@ -261,20 +423,17 @@ void dsk_init(void)
 	}
 }
 
-static int hawk_get_fd(void)
-{
-	return dsk_selected_unit < NUM_HAWK_UNITS ? hawk[dsk_selected_unit].fd : -1;
-}
-
 static void dsk_update_status() {
 	struct hawk_unit *u = &hawk[dsk_selected_unit];
+
+	unsigned busy = dsk_state != STATE_IDLE;
 
 	dsk_status = (dsk_seek_complete & 0x0f) // bits 0-3. One per hawk unit
 	     | (u->ready      << 4)   // Probally the ready signal from drive
 	     | (u->on_cyl     << 5)   // Head is on the correct cylinder
 	     | (0             << 6)   // write enable
 	     | (u->wprotect   << 7)   // Write Protect bit
-		 | (dsk_busy      << 8)   // command in progress
+		 | (busy          << 8)   // command in progress
 	     | (u->fault      << 9)   // drive fault
 	     | (u->seek_error << 10)  // Guess. Causes OPSYS to retry
 	     | (0             << 11)  // not seen
@@ -282,6 +441,11 @@ static void dsk_update_status() {
 	     | (dsk_addr_err  << 13)  // Address Error (address didn't match)
 	     | (dsk_timeout   << 14)  // Seek error line from drive
 	     | (0             << 15); // not seen
+
+	if (busy & u->fault) {
+		// If we have a fault, abort any running command
+		dsk_goto_idle();
+	}
 }
 
 static void hawk_clear_controller_error() {
@@ -318,66 +482,19 @@ static void hawk_clear_controller_error() {
 static void dsk_seek(unsigned trace)
 {
 	unsigned unit = dsk_selected_unit;
-	unsigned sec = dsk_selected_sector & 0x0F;
-	unsigned head = !!(dsk_selected_sector & 0x10);
-	unsigned cyl = dsk_selected_sector >> 5;
 
 	if (trace)
 		fprintf(stderr, "%04x: %i Seek to %u/%u/%u\n", cpu6_pc(), unit,
-			cyl, head, sec);
+			dsk_cylinder, dsk_head, dsk_sector);
 
 	if (hawk[unit].ready) {
-		hawk_seek(&hawk[unit], cyl, head);
-	}
-}
-
-uint8_t hawk_read_next(void)
-{
-	int fd = hawk_get_fd();
-	uint8_t c;
-
-	if (fd == -1) {
-		dsk_timeout = 1;
-	}
-	else if (read(fd, (void *)&c, 1) != 1) {
-		fprintf(stderr, "hawk I/O error\n");
-		// Treat this as if we read invalid data
-		dsk_crc_error = 1;
-	}
-	return c;
-}
-
-void hawk_write_next(uint8_t c)
-{
-	int fd = hawk_get_fd();
-
-	if (fd == -1) {
-		dsk_timeout = 1;
-	} else if (write(fd, (void *) &c, 1) != 1) {
-		fprintf(stderr, "hawk I/O error\n");
-		// Not sure if we have a write error, lets just set a few
-		dsk_crc_error = 1;
-		dsk_addr_err = 1;
-		dsk_fmt_err = 1;
+		hawk_seek(&hawk[unit], dsk_cylinder, dsk_head);
 	}
 }
 
 void hawk_dma_done(void)
 {
-    hawk_set_dma(0);
-	dsk_busy = 0;
-
-	unsigned unit = dsk_selected_unit;
-
-	// The Hawk disk unit will fault if a read/write is done off cylinder
-	if (hawk[unit].on_cyl == 0) {
-		hawk[unit].fault = 1;
-	}
-
-	// If hawk is on the wrong cylinder
-	if (hawk[unit].current_track != (dsk_selected_sector >> 4)) {
-		dsk_addr_err = 1;
-	}
+    dsk_goto_idle();
 }
 
 /*
@@ -407,22 +524,30 @@ void hawk_dma_done(void)
  */
 static void dsk_cmd(uint8_t cmd, unsigned trace)
 {
+	if (dsk_state != STATE_IDLE) {
+		if (trace)
+			fprintf(stderr, "dsk_cmd: dsk_state != STATE_IDLE\n");
+		return;
+	}
+
+	schedule_event(&dsk_timeout_evt);
+
 	// Controller errors appear to be cleared when starting a new command
 	hawk_clear_controller_error();
-
-	dsk_busy = 1;
 
 	switch (cmd) {
 	case 0:		/* Multi sector read  - 1 to 16 sectors */
 		if (trace)
 			fprintf(stderr, "%04X: hawk %i Read %f sectors\n", cpu6_pc(),
 				dsk_selected_unit, cpu6_dma_count() / 400.0);
+		dsk_transfer_mode = 1;
 		dsk_state = STATE_START;
 		break;
 	case 1:		/* Multi sector write - ditto */
 		if (trace)
 			fprintf(stderr, "%04X: hawk %i Write %f sectors\n", cpu6_pc(),
 				dsk_selected_unit, cpu6_dma_count() / 400.0);
+		dsk_transfer_mode = 2;
         dsk_state = STATE_START;
 		break;
 	case 2:		/* Seek */
@@ -438,7 +563,6 @@ static void dsk_cmd(uint8_t cmd, unsigned trace)
 	default:
 		fprintf(stderr, "%04X: Unknown hawk command %02X\n",
 			cpu6_pc(), cmd);
-		dsk_busy = 0;
 		break;
 	}
 }
@@ -452,12 +576,16 @@ void dsk_write(uint16_t addr, uint8_t val, unsigned trace)
 			fprintf(stderr, "Selected hawk unit %i\n", val);
 		break;
 	case 0xF141:
-		dsk_selected_sector &= 0x00ff;
-		dsk_selected_sector |= val << 8;
+		// bits are xxCC_CCCC_CCCH_SSSS
+		dsk_cylinder &= 0x007;
+		dsk_cylinder |= (val << 3);
 		break;
 	case 0xF142:
-		dsk_selected_sector &= 0xff00;
-		dsk_selected_sector |= val;
+		// continued
+		dsk_cylinder &= 0x7f8;
+		dsk_cylinder |= val >> 5;
+		dsk_head = !!(val & 0x10);
+		dsk_sector = val & 0x0f;
 		break;
 	// case 0xF143:
 		/* "It is a Write Enable Bit Mask to help protect against writing to a
@@ -484,8 +612,9 @@ void dsk_write(uint16_t addr, uint8_t val, unsigned trace)
 		break;
 	case 0xF14C:
 		// Strobe. This seems to force an interrupt.
-		// Guess, it's forcing the statemachine to DONE.
-		dsk_state = STATE_DONE;
+		// Guess, it's forcing the state machine to DONE which will trigger
+		// an interrupt if enabled.
+		dsk_state = STATE_IDLE;
 		break;
 	case 0xF14E:
 		// Strobe. Enable interrupt on DONE
@@ -494,6 +623,7 @@ void dsk_write(uint16_t addr, uint8_t val, unsigned trace)
 	case 0xF14F:
 		// Strobe. Acknowledge interrupt
 		dsk_interrupt_enabled = 0;
+		cpu_deassert_irq(dsk_irq);
 		break;
 	default:
 		fprintf(stderr,
@@ -502,7 +632,7 @@ void dsk_write(uint16_t addr, uint8_t val, unsigned trace)
 		return;
 	}
 
-	dsk_run_state_machine(trace);
+	dsk_run_state_machine(trace, get_current_time());
 }
 
 uint8_t dsk_read(uint16_t addr, unsigned trace)
@@ -510,9 +640,21 @@ uint8_t dsk_read(uint16_t addr, unsigned trace)
 	uint8_t status;
 	switch (addr) {
 	case 0xF141:
-		return dsk_selected_sector >> 8;
+		// 16bit word
+		// bits are xxCC_CCCC_CCCH_SSSS
+		// These two registers seem to be the current sector under head.
+		// But the unit doesn't report the actual cylinder/head position just
+		// the sector.
+		// So DSK probally combines the sector address with the last cyclinder
+		// and head written to 0xF141
+		return dsk_cylinder >> 3;
 	case 0xF142:
-		return dsk_selected_sector & 0xff;
+		// Continued
+
+		// Make sure hawk unit has latest state
+		hawk_update(&hawk[dsk_selected_unit], get_current_time());
+
+		return (dsk_cylinder << 5) | (dsk_head << 4) | hawk[dsk_selected_unit].sector_addr;
 	case 0xF144:
 		status = dsk_status >> 8;
 		// if (trace)
@@ -524,7 +666,7 @@ uint8_t dsk_read(uint16_t addr, unsigned trace)
 		// 	fprintf(stderr, "%04X: hawk status read low  | __%02x\n", cpu6_pc(), status);
 		return status ;
 	case 0xF148:		/* Bit 0 seems to be set while it is processing */
-		return dsk_busy;
+		return dsk_state != STATE_IDLE;
 	default:
 		fprintf(stderr, "%04X: Unknown hawk I/O read %04X\n",
 			cpu6_pc(), addr);
