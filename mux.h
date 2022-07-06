@@ -11,8 +11,8 @@ struct MuxUnit
         unsigned char lastc;
         int baud;
         unsigned char tx_done;
-        uint64_t rx_ready_time;
-        uint64_t tx_done_time;
+        int64_t rx_ready_time;
+        int64_t tx_done_time;
 };
 
 /* Status register bits */

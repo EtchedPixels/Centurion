@@ -28,4 +28,5 @@ struct event_t {
 void schedule_event(struct event_t *event);
 void cancel_event(struct event_t *event);
 void run_scheduler(uint64_t current_time, unsigned trace);
+int64_t scheduler_next();
 int64_t get_current_time();

@@ -22,7 +22,7 @@
 static unsigned finch;		/* Finch or original FDC */
 
 volatile unsigned int emulator_done;
-static uint64_t cpu_timestamp_ns = 0;
+static int64_t cpu_timestamp_ns = 0;
 
 #define TRACE_MEM_RD	1
 #define TRACE_MEM_WR	2
@@ -638,7 +638,7 @@ void mem_write16_debug(uint32_t addr, uint16_t val)
 	mem_write8_debug(addr+1, val & 0xff);
 }
 
-uint64_t get_current_time() {
+int64_t get_current_time() {
 	return cpu_timestamp_ns;
 }
 
