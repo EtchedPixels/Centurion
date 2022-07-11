@@ -563,7 +563,6 @@ static int bignum_sub(int a_len, int b_len, uint64_t a_addr, uint16_t b_addr, in
 		fprintf(stderr, "unsupported SUBBIG at %04X\n", exec_pc);
 		exit(-1);
 	}
-	int a_idx = b_len - a_len; // might be negative
 
 	// For debugging
 	uint64_t result_big = 0;
