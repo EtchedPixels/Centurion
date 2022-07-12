@@ -5,10 +5,12 @@
 #include <assert.h>
 #include <stdio.h>
 #include <stdlib.h>
+#include <string.h>
 #include <unistd.h>
 
 static void hawk_write_bits(struct hawk_unit* unit, int count, uint8_t* data);
 static void hawk_set_bits(struct hawk_unit* unit, int count, uint8_t val);
+static void hawk_erase_bits(struct hawk_unit* unit, int count);
 
 struct seek_event_t {
     struct event_t event;
@@ -65,6 +67,7 @@ struct rotation_event_t {
     struct event_t event;
     struct hawk_unit *unit;
     unsigned in_process;
+    unsigned update_data_ptr;
 };
 
 static void hawk_rotation_event_cb(struct event_t* event, int64_t late_ns);
@@ -105,10 +108,12 @@ static int hawk_buffer_track(struct hawk_unit* unit, unsigned cyl, unsigned head
         return 0;
     }
 
+    memset(unit->datacells, 0, sizeof(unit->datacells));
+
     for (int sector = 0; sector < HAWK_SECTS_PER_TRK; sector++) {
-        int start = unit->data_ptr = sector * HAWK_RAW_SECTOR_BITS;
+        unit->data_ptr = sector * HAWK_RAW_SECTOR_BITS;
         // ~120 bit gap, to compensate mechanical jitter
-        hawk_set_bits(unit, HAWK_GAP_BITS, 0);
+        hawk_erase_bits(unit, HAWK_GAP_BITS);
 
         // sync. 87 zeros, followed by a one
         hawk_set_bits(unit, HAWK_SYNC_BITS-1, 0);
@@ -126,7 +131,7 @@ static int hawk_buffer_track(struct hawk_unit* unit, unsigned cyl, unsigned head
         hawk_write_bits(unit, 32, addr_data);
 
         // second gap
-        hawk_set_bits(unit, HAWK_GAP_BITS, 0);
+        hawk_erase_bits(unit, HAWK_GAP_BITS);
 
         // another sync
         hawk_set_bits(unit, HAWK_SYNC_BITS-1, 0);
@@ -145,12 +150,8 @@ static int hawk_buffer_track(struct hawk_unit* unit, unsigned cyl, unsigned head
         hawk_write_bits(unit, 16, crc);
 
         // Trailer
-        hawk_set_bits(unit, HAWK_GAP_BITS / 2, 0);
-        //fprintf(stderr, "Hawk: %i wrote %i bits to %i\n", sector, unit->data_ptr - start, start);
+        hawk_set_bits(unit, HAWK_GAP_BITS / 4, 0);
     }
-
-    //fprintf(stderr, "Hawk track %d,%d loaded.\n", cyl, head);
-
     return 1;
 }
 
@@ -240,7 +241,8 @@ static void hawk_rotation_event_cb(struct event_t* event, int64_t late_ns)
     hawk_update(unit, time);
 
      // Copy current head position to read/write pointer
-    unit->data_ptr = unit->head_pos;
+    if (rotation_event.update_data_ptr)
+        unit->data_ptr = unit->head_pos;
     dsk_hawk_changed(unit->unit_num, time);
 }
 
@@ -257,19 +259,63 @@ void hawk_wait_sector(struct hawk_unit* unit, unsigned sector) {
 
     rotation_event.unit = unit;
     rotation_event.in_process = 1;
+    rotation_event.update_data_ptr = 1;
     rotation_event.event.delta_ns = delta;
     rotation_event.event.callback = hawk_rotation_event_cb;
 
     schedule_event(&rotation_event.event);
-    // fprintf(stderr, "wait for %i, Scheduled rotation finished in %f ms\n", sector, (double)rotation_event.event.delta_ns / ONE_MILISECOND_NS);
+}
+
+int hawk_wait_sync(struct hawk_unit* unit) {
+    if (rotation_event.in_process)
+        return 1;
+
+    // Find the next one bit
+    int32_t ptr = unit->data_ptr - 1;
+    uint8_t bit;
+    do {
+        ptr = (ptr + 1) % HAWK_RAW_TRACK_BITS;
+        bit = unit->datacells[ptr];
+    } while (bit != (HAWK_DATACELL_CLOCK_BIT | HAWK_DATACELL_DATA_BIT));
+
+    if (ptr <= unit->head_pos)
+        return 0; // don't need to wait
+
+    // Calculate rotation offset to it
+    int64_t now = get_current_time();
+    int64_t rotation = (now + unit->rotation_offset) % (uint64_t)HAWK_ROTATION_NS;
+    int64_t desired_rotation = HAWK_BIT_NS * ptr;
+
+    int64_t delta = (desired_rotation - rotation) % (uint64_t)HAWK_ROTATION_NS;
+
+    // schedule event
+    rotation_event.unit = unit;
+    rotation_event.in_process = 1;
+    rotation_event.event.delta_ns = delta;
+    rotation_event.event.callback = hawk_rotation_event_cb;
+    rotation_event.update_data_ptr = 0;
+
+    schedule_event(&rotation_event.event);
+
+    return 1;
 }
 
 void hawk_read_bits(struct hawk_unit* unit, int count, uint8_t *dest) {
     while (1) {
         uint8_t byte = 0;
+        uint8_t bit;
         for (int shift = 7; shift >= 0; shift--) {
-            uint8_t bit = unit->current_track_data[unit->data_ptr++];
-            unit->data_ptr %= HAWK_RAW_TRACK_BITS;
+            do {
+                bit = unit->datacells[unit->data_ptr++];
+                unit->data_ptr %= HAWK_RAW_TRACK_BITS;
+            } while (bit == 0); // skip over any erased bits
+            bit &= HAWK_DATACELL_DATA_BIT;
+
+            // This is somewhat realistic to real hardware. The data
+            // and clock pluses have been split into separate signals by
+            // the data recovery board's PLL, and that won't instantly
+            // desync if the on-disk clock is missing.
+
             bit = bit << shift;
             byte |= bit;
             if (--count == 0) {
@@ -308,16 +354,22 @@ static void hawk_write_bits(struct hawk_unit* unit, int count, uint8_t* data) {
             if (count-- == 0)
                 return;
 
-            uint8_t bit = (byte >> shift) & 1;
-            unit->current_track_data[unit->data_ptr++] = bit;
+            uint8_t bit = ((byte >> shift) & 1) | HAWK_DATACELL_CLOCK_BIT;
+            unit->datacells[unit->data_ptr++] = bit;
         }
     }
 }
 
 static void hawk_set_bits(struct hawk_unit* unit, int count, uint8_t val) {
-    val = val & 1;
+    val = (val & 1) | HAWK_DATACELL_CLOCK_BIT;
 
     while (count--) {
-        unit->current_track_data[unit->data_ptr++] = val;
+        unit->datacells[unit->data_ptr++] = val;
+    }
+}
+
+static void hawk_erase_bits(struct hawk_unit* unit, int count) {
+    while (count--) {
+        unit->datacells[unit->data_ptr++] = 0;
     }
 }

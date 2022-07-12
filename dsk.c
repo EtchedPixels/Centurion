@@ -58,7 +58,6 @@ static unsigned dsk_interrupt_ack;
 static uint16_t dsk_status;
 
 static unsigned dsk_tracing;
-static unsigned dsk_sync_count; // Number of zero bits seen during sync
 static unsigned dsk_transfer_mode; // 1=read, 0=write
 
 static unsigned dsk_transfer_count; // number of bytes transferred during current sector
@@ -156,53 +155,43 @@ static void dsk_goto_idle() {
 static void dsk_check_sync(enum dsk_state_t success_state, int64_t time)
 {
 	struct hawk_unit* unit = &hawk[dsk_selected_unit];
-	int remaining = hawk_remaining_bits(unit, time);
+
+	hawk_update(unit, time);
+	if (hawk_wait_sync(unit))
+		return;
 
 	// At some threshold, the state-machine has seen enough zero bits
 	// Guess, threshold is ~60 bits
-	const int sync_threshold = 60;
+	const int zero_threshold = 60;
+	int sync_count = 0;
+	int zero_count = 0;
 
-	// if (remaining < (sync_threshold - dsk_sync_count)) {
-	// 	dsk_reschedule(HAWK_BIT_NS * (remaining - (sync_threshold - dsk_sync_count)) + HAWK_BIT_NS);
-	// 	return;
-	// }
+	int32_t pos = unit->data_ptr;
+	uint8_t bit = unit->datacells[pos];
 
-	// Do this in chunks of 8 bits, for better performance
-	while (remaining > 8) {
-		uint8_t data = hawk_read_byte(unit);
-		remaining -= 8;
+	while ((bit & HAWK_DATACELL_DATA_BIT) == 0) {
+		// shouldn't happen when we are generating our own bit data
+		// Fixme: Fail instead of asserting
+		assert(pos != unit->head_pos);
 
-		if (data == 0) {
-			dsk_sync_count += 8;
-			continue;
-		}
+		sync_count++;
 
-		dsk_sync_count += 8;
-		unsigned rewind_count = 0;
+		if (bit & HAWK_DATACELL_CLOCK_BIT)
+			zero_count++;
 
-		while (data != 1) {
-			data >>= 1;
-			dsk_sync_count--;
-			rewind_count++;
-
-		}
-		fprintf(stderr, "Sync after %i zeros. Rewind %d bits\n", dsk_sync_count, rewind_count);
-		// if we read too much, rewind to simplify our code
-		hawk_rewind(unit, rewind_count);
-
-		if (dsk_sync_count > 60) {
-			dsk_state = success_state;
-			return;
-		} else {
-			// We saw a 1 bit too early. Format Error
-			dsk_fmt_err = 1;
-			dsk_goto_idle();
-			return;
-		}
+		pos = (pos + 1) % HAWK_RAW_TRACK_BITS;
+		bit = unit->datacells[pos];
 	}
 
-	dsk_reschedule(HAWK_BIT_NS * (16 - remaining));
-	return;
+	unit->data_ptr = pos+1;
+
+	if (zero_count < zero_threshold || sync_count < HAWK_GAP_BITS) {
+		dsk_fmt_err = 1;
+		dsk_goto_idle();
+		return;
+	}
+
+	dsk_state = success_state;
 }
 
 static void dsk_verify_addr(int64_t time)
@@ -239,10 +228,10 @@ static void dsk_read_data(int64_t time)
 	while (remaining >= 8) {
 		uint8_t data = hawk_read_byte(unit);
 		cpu6_dma_write(data);
-		fprintf(stderr, "%02x ", data);
-		if (dsk_transfer_count % 16 == 1) {
-			fprintf(stderr, "\n");
-		}
+		// fprintf(stderr, "%02x ", data);
+		// if (dsk_transfer_count % 16 == 1) {
+		// 	fprintf(stderr, "\n");
+		// }
 		remaining -= 8;
 		if (--dsk_transfer_count == 0) {
 			dsk_state = STATE_CRC;
@@ -328,7 +317,6 @@ static void dsk_run_state_machine(unsigned trace, int64_t time)
 			hawk_update(&hawk[unit], time);
 			if (hawk[unit].sector_pulse && hawk[unit].sector_addr == dsk_sector) {
 				dsk_state = STATE_ADDR_SYNC;
-				dsk_sync_count = 0;
 			}
 			break;
 		case STATE_ADDR_SYNC:
@@ -436,12 +424,9 @@ void dsk_init(void)
 
 			hawk[i].ready = 1;
 
-			// Hawk units automatically RTZ when first coming online
-			hawk_rtz(&hawk[i]);
-
-			// Hack: I don't think this happens on real hardware, but this
-			//       allows us to skip WIPL and start with LOAD
-			dsk_seek_active |= 1 << (i / 2);
+			// Hawk units automatically RTZ, so assume that's finished and
+			// it's on-track
+			hawk[i].on_cyl = 1;
 		}
 	}
 }

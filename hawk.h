@@ -18,6 +18,9 @@
 #define HAWK_SECTOR_NS (HAWK_ROTATION_NS / HAWK_SECTS_PER_TRK)
 #define HAWK_SECTOR_PULSE_NS (2000) // Complete guess
 
+#define HAWK_DATACELL_DATA_BIT  0x01
+#define HAWK_DATACELL_CLOCK_BIT 0x10
+
 struct hawk_unit {
 // Output signals
 	// Ready
@@ -79,7 +82,7 @@ struct hawk_unit {
 	uint8_t sector_addr;
 
 	// Unimplemented output signals from Hawk unit
-	// Some of them probally go in status.
+	// Some of them probably go in status.
 	//   Index (sector 0 pulse), Density
 	//
 	// // See Page 25 of HAWK_9427_BP11_OCT80.pdf for details
@@ -93,11 +96,15 @@ struct hawk_unit {
 	// current cylinder << 1 | head
 	uint16_t current_track;
 
+	// Datacells for current track
 	// Wastefully store 1 bit per byte.
-	uint8_t current_track_data[HAWK_RAW_TRACK_BITS];
+	// Bottom bit is actual data. Forth bit is "clock" signal, that will be one
+	// for every data cell that contains data, and zero for data cells that
+	// haven't been written.
+	uint8_t datacells[HAWK_RAW_TRACK_BITS];
 
-	uint32_t data_ptr;
-	uint32_t head_pos;
+	int32_t data_ptr;
+	int32_t head_pos;
 	uint64_t rotation_offset;
 };
 
@@ -109,6 +116,7 @@ uint8_t hawk_read_byte(struct hawk_unit* unit);
 uint16_t hawk_read_word(struct hawk_unit* unit);
 void hawk_rewind(struct hawk_unit* unit, int count); // cheating
 void hawk_wait_sector(struct hawk_unit* unit, unsigned sector);
+int hawk_wait_sync(struct hawk_unit* unit);
 void hawk_update(struct hawk_unit* unit, int64_t now);
 
 // Callback to dsk
