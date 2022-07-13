@@ -3,97 +3,50 @@
 #include "scheduler.h"
 
 #include <assert.h>
+#include <stddef.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 #include <unistd.h>
 
+#define HAWK_EVENT_NONE             0
+#define HAWK_EVENT_SEEK_SUCCESS     1
+#define HAWK_EVENT_SEEK_ERROR       2
+#define HAWK_EVENT_ROTATE_SECTOR    3
+#define HAWK_EVENT_ROTATE_SYNC      4
+
 static void hawk_write_bits(struct hawk_drive* unit, int count, uint8_t* data);
 static void hawk_set_bits(struct hawk_drive* unit, int count, uint8_t val);
 static void hawk_erase_bits(struct hawk_drive* unit, int count);
 
-struct seek_event_t {
-    struct event_t event;
-    struct hawk_drive *unit;
-    unsigned seek_error;
-};
-
-static void hawk_seek_callback(struct event_t* event, int64_t late_ns);
-
-static struct seek_event_t seek_event[8] = {{
-    .event = {
-        .name = "hawk0_seek",
-        .callback = hawk_seek_callback,
-    }
-},{
-    .event = {
-        .name = "hawk1_seek",
-        .callback = hawk_seek_callback,
-    }
-},{
-    .event = {
-        .name = "hawk2_seek",
-        .callback = hawk_seek_callback,
-    }
-},{
-    .event = {
-        .name = "hawk3_seek",
-        .callback = hawk_seek_callback,
-    }
-},{
-    .event = {
-        .name = "hawk4_seek",
-        .callback = hawk_seek_callback,
-    }
-},{
-    .event = {
-        .name = "hawk5_seek",
-        .callback = hawk_seek_callback,
-    }
-},{
-    .event = {
-        .name = "hawk6_seek",
-        .callback = hawk_seek_callback,
-    }
-},{
-    .event = {
-        .name = "hawk7_seek",
-        .callback = hawk_seek_callback,
-    }
-}
-};
-
-struct rotation_event_t {
-    struct event_t event;
-    struct hawk_drive *unit;
-    unsigned in_process;
-    unsigned update_data_ptr;
-};
-
-static void hawk_rotation_event_cb(struct event_t* event, int64_t late_ns);
-
-static struct rotation_event_t rotation_event = {
-    .event = {
-        .name = "hawk_rotation",
-        .callback = hawk_rotation_event_cb,
-    }
-};
-
-static void hawk_seek_callback(struct event_t* event, int64_t late_ns)
+static void hawk_event_callback(struct event_t* event, int64_t late_ns)
 {
-    struct seek_event_t* e = (struct seek_event_t*)event;
-    struct hawk_drive* unit = e->unit;
+    // Event is the first member of the hawk_drive struct, so we can just cast it.
+    struct hawk_drive* unit = (struct hawk_drive*)event;
+    assert(offsetof(struct hawk_drive, event) == 0);
 
-    unit->seek_error = e->seek_error;
+    switch (unit->event_type) {
+    case HAWK_EVENT_SEEK_ERROR:
+        unit->seek_error = 1;
+        unit->seeking = 0;
+        break;
+    case HAWK_EVENT_SEEK_SUCCESS:
+        unit->seeking = 0;
+        break;
+    default:
+        break;
+    }
 
-    // It's more of seek-complete than actually on_cyl.
-    // Forced to zero as soon as a seek begins.
-    // Gets set even if the seek errors out
-    unit->on_cyl = 1;
-    unit->seeking = 0;
+    int64_t time = get_current_time() - late_ns;
+    hawk_update(unit, time);
+
+    if (unit->event_type == HAWK_EVENT_ROTATE_SECTOR)
+        unit->data_ptr = unit->head_pos;
+
+    unit->event_type = HAWK_EVENT_NONE;
 
     // notify DSK emulation that something happened
-    dsk_hawk_changed(unit->drive_num, get_current_time() - late_ns);
+    dsk_hawk_changed(unit->drive_num, time);
 }
 
 // Reads entire track of data into host memory.
@@ -188,17 +141,14 @@ void hawk_seek(struct hawk_drive* unit, unsigned fixed, unsigned cyl, unsigned h
 
     // According to specs, the average track-to-track seek time is 7.5ms.
     // TODO: Accurate seek times
-    struct seek_event_t* e = &seek_event[unit->drive_num];
-    e->event.delta_ns = 7.5 * ONE_MILISECOND_NS;
-    e->event.callback = hawk_seek_callback;
-    e->unit = unit;
-    e->seek_error = 0;
+    unit->event.delta_ns = 7.5 * ONE_MILISECOND_NS;
+    unit->event_type = HAWK_EVENT_SEEK_SUCCESS;
 
     // To simplify emulation, slurp the whole track into host memory
     hawk_buffer_track(unit, fixed, cyl, head);
 
     unit->addr_ack = 1;
-    schedule_event(&e->event);
+    schedule_event(&unit->event);
 }
 
 
@@ -214,6 +164,9 @@ void hawk_rtz(struct hawk_drive* unit, unsigned fixed)
 }
 
 void hawk_update(struct hawk_drive* unit, int64_t now) {
+    // It's more of seek-complete than actually on_cyl.
+    // Forced to zero as soon as a seek begins.
+    // Gets set even if the seek errors out
     unit->on_cyl = unit->ready && !unit->seeking;
 
     uint64_t rotation = (now + unit->rotation_offset) % (uint64_t)HAWK_ROTATION_NS;
@@ -225,6 +178,10 @@ void hawk_update(struct hawk_drive* unit, int64_t now) {
 
 void hawk_init(struct hawk_drive *unit, unsigned drive_num, int fd1, int fd2) {
     memset(unit, 0, sizeof(struct hawk_drive));
+
+    unit->event.callback = hawk_event_callback;
+    snprintf(unit->event_name_string, sizeof(unit->event_name_string), "hawk%d_event", drive_num);
+    unit->event.name = unit->event_name_string;
 
     unit->drive_num = drive_num;
     unit->wprotect = 1;
@@ -255,21 +212,7 @@ int hawk_remaining_bits(struct hawk_drive* unit, uint64_t time) {
     return unit->head_pos - unit->data_ptr;
 }
 
-static void hawk_rotation_event_cb(struct event_t* event, int64_t late_ns)
-{
-    assert(event == &rotation_event.event);
-    rotation_event.in_process = 0;
 
-    struct hawk_drive* unit = rotation_event.unit;
-
-    int64_t time = get_current_time() - late_ns;
-    hawk_update(unit, time);
-
-     // Copy current head position to read/write pointer
-    if (rotation_event.update_data_ptr)
-        unit->data_ptr = unit->head_pos;
-    dsk_hawk_changed(unit->drive_num, time);
-}
 
 void hawk_wait_sector(struct hawk_drive* unit, unsigned sector) {
     int64_t now = get_current_time();
@@ -280,19 +223,16 @@ void hawk_wait_sector(struct hawk_drive* unit, unsigned sector) {
     if (delta < 0)
         delta += HAWK_ROTATION_NS;
 
-    assert(rotation_event.in_process == 0);
+    assert(unit->event_type == 0);
 
-    rotation_event.unit = unit;
-    rotation_event.in_process = 1;
-    rotation_event.update_data_ptr = 1;
-    rotation_event.event.delta_ns = delta;
-    rotation_event.event.callback = hawk_rotation_event_cb;
+    unit->event.delta_ns = delta;
+    unit->event_type = HAWK_EVENT_ROTATE_SECTOR;
 
-    schedule_event(&rotation_event.event);
+    schedule_event(&unit->event);
 }
 
 int hawk_wait_sync(struct hawk_drive* unit) {
-    if (rotation_event.in_process)
+    if (unit->event_type != HAWK_EVENT_NONE)
         return 1;
 
     // Find the next one bit
@@ -314,13 +254,9 @@ int hawk_wait_sync(struct hawk_drive* unit) {
     int64_t delta = (desired_rotation - rotation) % (uint64_t)HAWK_ROTATION_NS;
 
     // schedule event
-    rotation_event.unit = unit;
-    rotation_event.in_process = 1;
-    rotation_event.event.delta_ns = delta;
-    rotation_event.event.callback = hawk_rotation_event_cb;
-    rotation_event.update_data_ptr = 0;
-
-    schedule_event(&rotation_event.event);
+    unit->event.delta_ns = delta;
+    unit->event_type = HAWK_EVENT_ROTATE_SYNC;
+    schedule_event(&unit->event);
 
     return 1;
 }

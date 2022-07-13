@@ -22,6 +22,10 @@
 #define HAWK_DATACELL_CLOCK_BIT 0x10
 
 struct hawk_drive {
+	struct event_t event;
+	unsigned event_type;
+	char event_name_string[16];
+
 // Output signals
 	// Ready
 	// High when:
