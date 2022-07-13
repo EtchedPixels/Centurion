@@ -144,6 +144,9 @@ void hawk_seek(struct hawk_drive* unit, unsigned fixed, unsigned cyl, unsigned h
     unit->event.delta_ns = 7.5 * ONE_MILISECOND_NS;
     unit->event_type = HAWK_EVENT_SEEK_SUCCESS;
 
+    if (unit->instant_read)
+        unit->event.delta_ns = 0;
+
     // To simplify emulation, slurp the whole track into host memory
     hawk_buffer_track(unit, fixed, cyl, head);
 
@@ -212,8 +215,6 @@ int hawk_remaining_bits(struct hawk_drive* unit, uint64_t time) {
     return unit->head_pos - unit->data_ptr;
 }
 
-
-
 void hawk_wait_sector(struct hawk_drive* unit, unsigned sector) {
     int64_t now = get_current_time();
     int64_t rotation = (now + unit->rotation_offset) % (uint64_t)HAWK_ROTATION_NS;
@@ -222,6 +223,13 @@ void hawk_wait_sector(struct hawk_drive* unit, unsigned sector) {
     int64_t delta = desired_rotation - rotation;
     if (delta < 0)
         delta += HAWK_ROTATION_NS;
+
+    if (unit->instant_read) {
+        // Just teleport the platter to the correct rotation
+        unit->rotation_offset += delta;
+        unit->rotation_offset %= (uint64_t)HAWK_ROTATION_NS;
+        delta = 1000; // Small delta to allow scheduler to return to DMA loop
+    }
 
     assert(unit->event_type == 0);
 
@@ -243,6 +251,15 @@ int hawk_wait_sync(struct hawk_drive* unit) {
         bit = unit->datacells[ptr];
     } while (bit != (HAWK_DATACELL_CLOCK_BIT | HAWK_DATACELL_DATA_BIT));
 
+    if (unit->instant_read) {
+        // If we are doing instant reads, don't just wait for sync. Wait for
+        // the end of the currently recorded section.
+        while ((bit & HAWK_DATACELL_CLOCK_BIT) != 0) {
+            ptr = (ptr + 1) % HAWK_RAW_TRACK_BITS;
+            bit = unit->datacells[ptr];
+        }
+    }
+
     if (ptr <= unit->head_pos)
         return 0; // don't need to wait
 
@@ -252,6 +269,16 @@ int hawk_wait_sync(struct hawk_drive* unit) {
     int64_t desired_rotation = HAWK_BIT_NS * ptr;
 
     int64_t delta = (desired_rotation - rotation) % (uint64_t)HAWK_ROTATION_NS;
+
+    if (unit->instant_read) {
+        // Just teleport the platter to the correct rotation
+        unit->rotation_offset += delta;
+        unit->rotation_offset %= (uint64_t)HAWK_ROTATION_NS;
+
+        // Don't need to wait
+        hawk_update(unit, now);
+        return 0;
+    }
 
     // schedule event
     unit->event.delta_ns = delta;

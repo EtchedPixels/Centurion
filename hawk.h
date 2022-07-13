@@ -112,6 +112,9 @@ struct hawk_drive {
 	int32_t data_ptr;
 	int32_t head_pos;
 	uint64_t rotation_offset;
+
+	// For unrealistically instant seeking, and teleporting rotations
+	unsigned instant_read;
 };
 
 void hawk_init(struct hawk_drive* unit, unsigned drive_num, int fd1, int fd2);
