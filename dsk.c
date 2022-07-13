@@ -41,7 +41,7 @@
  */
 
 /* I've taken the number from the ceiling */
-#define NUM_HAWK_UNITS 8
+#define NUM_HAWK_DRIVES 4
 
 // This seems to be hardcoded (or configurable by jumpers?)
 static uint8_t dsk_irq = 2;
@@ -99,7 +99,7 @@ static uint8_t dsk_crc_error;
 static uint8_t dsk_seek_active;
 static uint8_t dsk_seek_complete;
 
-static struct hawk_unit hawk[NUM_HAWK_UNITS];
+static struct hawk_drive hawk[NUM_HAWK_DRIVES];
 
 static void dsk_seek(unsigned trace);
 static void dsk_update_status();
@@ -144,7 +144,7 @@ static void dsk_reschedule(int64_t delta_ns)
 	schedule_event(&dsk_runstate_evt);
 }
 
-static void dsk_goto_idle() {
+static void dsk_goto_finish() {
 	dsk_state = STATE_FINISH;
 	cancel_event(&dsk_timeout_evt);
 	hawk_set_dma(0);
@@ -154,7 +154,7 @@ static void dsk_goto_idle() {
 
 static void dsk_check_sync(enum dsk_state_t success_state, int64_t time)
 {
-	struct hawk_unit* unit = &hawk[dsk_selected_unit];
+	struct hawk_drive* unit = &hawk[dsk_selected_unit / 2];
 
 	hawk_update(unit, time);
 	if (hawk_wait_sync(unit))
@@ -187,7 +187,7 @@ static void dsk_check_sync(enum dsk_state_t success_state, int64_t time)
 
 	if (zero_count < zero_threshold || sync_count < HAWK_GAP_BITS) {
 		dsk_fmt_err = 1;
-		dsk_goto_idle();
+		dsk_goto_finish();
 		return;
 	}
 
@@ -196,7 +196,7 @@ static void dsk_check_sync(enum dsk_state_t success_state, int64_t time)
 
 static void dsk_verify_addr(int64_t time)
 {
-	struct hawk_unit* unit = &hawk[dsk_selected_unit];
+	struct hawk_drive* unit = &hawk[dsk_selected_unit / 2];
 
 	int remaining = hawk_remaining_bits(unit, time);
 
@@ -213,7 +213,7 @@ static void dsk_verify_addr(int64_t time)
 	if (addr != expected || checkword != expected) {
 		fprintf(stderr, "Addr error: %04hx != %04hx || %04hx != %04hx\n", addr, expected, checkword, expected);
 		dsk_addr_err = 1;
-		dsk_goto_idle();
+		dsk_goto_finish();
 		return;
 	}
 
@@ -222,7 +222,8 @@ static void dsk_verify_addr(int64_t time)
 
 static void dsk_read_data(int64_t time)
 {
-	struct hawk_unit* unit = &hawk[dsk_selected_unit];
+	struct hawk_drive* unit = &hawk[dsk_selected_unit / 2];
+	//time = get_current_time();
 	int remaining = hawk_remaining_bits(unit, time);
 
 	while (remaining >= 8) {
@@ -238,14 +239,14 @@ static void dsk_read_data(int64_t time)
 			return;
 		}
 	}
-	if (remaining == 0)
+	if (remaining <= 0)
 		remaining = 8;
 	dsk_reschedule(HAWK_BIT_NS * remaining);
 }
 
 static void dsk_do_crc(int64_t time)
 {
-	struct hawk_unit* unit = &hawk[dsk_selected_unit];
+	struct hawk_drive* unit = &hawk[dsk_selected_unit / 2];
 	int remaining = hawk_remaining_bits(unit, time);
 
 	if (remaining < 16) {
@@ -259,7 +260,7 @@ static void dsk_do_crc(int64_t time)
 		if (crc != 0xcccc) {
 			fprintf(stderr, "DSK: CRC error. Got 0x%04x\n", crc);
 			dsk_crc_error = 1;
-			dsk_goto_idle();
+			dsk_goto_finish();
 		} else {
 			dsk_sector = (dsk_sector + 1) & 0xf;
 			hawk_wait_sector(unit, dsk_sector);
@@ -272,7 +273,8 @@ static void dsk_do_crc(int64_t time)
 
 static void dsk_run_state_machine(unsigned trace, int64_t time)
 {
-	unsigned unit = dsk_selected_unit;
+	unsigned drive = dsk_selected_unit / 2;
+	unsigned drive_bit = 1 << drive;
 	dsk_tracing = trace;
 
 	do {
@@ -287,35 +289,38 @@ static void dsk_run_state_machine(unsigned trace, int64_t time)
 		case STATE_SEEK:
 			// Start a sync
 			dsk_seek(trace);
-			if (hawk[unit].addr_ack) {
+			if (hawk[drive].addr_ack) {
 				dsk_state = STATE_WAIT_SEEK;
-				dsk_seek_active |= 1 << (unit / 2);
+
+				dsk_seek_active |= drive_bit;
+				dsk_seek_complete &= ~drive_bit;
 			}
 			break;
 		case STATE_RTZ:
 			// start a rtz
-			hawk_rtz(&hawk[unit]);
-			if (hawk[unit].addr_ack) {
-				dsk_seek_active |= 1 << (unit / 2);
+			hawk_rtz(&hawk[drive], dsk_selected_unit & 1);
+			if (hawk[drive].addr_ack) {
+				dsk_seek_active |= drive_bit;
+				dsk_seek_complete &= ~drive_bit;
 				dsk_state = STATE_WAIT_SEEK;
 			}
 			break;
 		case STATE_WAIT_SEEK:
 			// Wait until all active seeks/RTZs are complete
 			if (dsk_seek_active == 0) {
-				dsk_goto_idle();
+				dsk_goto_finish();
 			}
 			break;
 
 		case STATE_START:
 			// Start of a read or write
-			hawk_wait_sector(&hawk[unit], dsk_sector);
+			hawk_wait_sector(&hawk[drive], dsk_sector);
 			dsk_state = STATE_WAIT_SECTOR;
 			break;
 		case STATE_WAIT_SECTOR:
 			// wait for the sector
-			hawk_update(&hawk[unit], time);
-			if (hawk[unit].sector_pulse && hawk[unit].sector_addr == dsk_sector) {
+			hawk_update(&hawk[drive], time);
+			if (hawk[drive].sector_pulse && hawk[drive].sector_addr == dsk_sector) {
 				dsk_state = STATE_ADDR_SYNC;
 			}
 			break;
@@ -388,13 +393,13 @@ static void dsk_timeout_cb(struct event_t* event, int64_t late_ns)
 	hawk_set_dma(0);
 
 	dsk_timeout = 1;
-	dsk_goto_idle();
+	dsk_goto_finish();
 }
 
-void dsk_hawk_changed(unsigned unit, int64_t time)
+void dsk_hawk_changed(unsigned drive, int64_t time)
 {
-	if (hawk[unit].on_cyl) {
-		unsigned drive_bit = 1 << (unit >> 1);
+	if (hawk[drive].on_cyl) {
+		unsigned drive_bit = 1 << drive;
 
 		if (dsk_seek_active & drive_bit) {
 			dsk_seek_active &= ~drive_bit;
@@ -407,37 +412,34 @@ void dsk_hawk_changed(unsigned unit, int64_t time)
 
 void dsk_init(void)
 {
-	int i;
+	int drive, fd1, fd2, unit;
 	char name[32];
 
-	for (i = 0; i < NUM_HAWK_UNITS; i++) {
-		memset(&hawk[i], 0, sizeof(hawk[i]));
+	for (drive = 0; drive < NUM_HAWK_DRIVES; drive++) {
+		unit = drive * 2;
 
-		sprintf(name, "hawk%u.disk", i);
-		hawk[i].unit_num = i;
-		hawk[i].fd = open(name, O_RDWR|O_BINARY);
-		hawk[i].wprotect = 1;
+		// Removable Platter
+		snprintf(name, sizeof(name), "hawk%u.disk", unit);
+		fd1 = open(name, O_RDWR|O_BINARY);
 
-		if (hawk[i].fd > 0) {
-			// On a real drive it's more complex. But for us, if
-			// we have an image file for the unit, it's ready.
+		// Fixed Platter
+		snprintf(name, sizeof(name), "hawk%u.disk", unit + 1);
+		fd2 = open(name, O_RDWR|O_BINARY);
 
-			hawk[i].ready = 1;
+		// We don't check status of opens
 
-			// Hawk units automatically RTZ, so assume that's finished and
-			// it's on-track
-			hawk[i].on_cyl = 1;
-		}
+		hawk_init(&hawk[drive], drive, fd1, fd2);
 	}
 }
 
 static void dsk_update_status() {
-	struct hawk_unit *u = &hawk[dsk_selected_unit];
+	unsigned drive = dsk_selected_unit / 2;
+	struct hawk_drive *u = &hawk[drive];
 
 	unsigned busy = dsk_state != STATE_IDLE;
 
 	dsk_status = (dsk_seek_complete & 0x0f) // bits 0-3. One per hawk unit
-	     | (u->ready      << 4)   // Probally the ready signal from drive
+	     | (u->ready      << 4)   // Probably the ready signal from drive
 	     | (u->on_cyl     << 5)   // Head is on the correct cylinder
 	     | (0             << 6)   // write enable
 	     | (u->wprotect   << 7)   // Write Protect bit
@@ -452,7 +454,7 @@ static void dsk_update_status() {
 
 	if (busy & u->fault) {
 		// If we have a fault, abort any running command
-		dsk_goto_idle();
+		dsk_goto_finish();
 	}
 }
 
@@ -489,20 +491,21 @@ static void hawk_clear_controller_error() {
  */
 static void dsk_seek(unsigned trace)
 {
-	unsigned unit = dsk_selected_unit;
+	unsigned drive = dsk_selected_unit / 2;
+	unsigned fixed = dsk_selected_unit & 1;
 
 	if (trace)
-		fprintf(stderr, "%04x: %i Seek to %u/%u/%u\n", cpu6_pc(), unit,
+		fprintf(stderr, "%04x: %i Seek to %u/%u/%u\n", cpu6_pc(), drive,
 			dsk_cylinder, dsk_head, dsk_sector);
 
-	if (hawk[unit].ready) {
-		hawk_seek(&hawk[unit], dsk_cylinder, dsk_head);
+	if (hawk[drive].ready) {
+		hawk_seek(&hawk[drive], fixed, dsk_cylinder, dsk_head);
 	}
 }
 
 void hawk_dma_done(void)
 {
-    dsk_goto_idle();
+    dsk_goto_finish();
 }
 
 /*
@@ -579,10 +582,11 @@ void dsk_write(uint16_t addr, uint8_t val, unsigned trace)
 	switch (addr) {
 	case 0xF140:
 		dsk_selected_unit = val;
+
 		// guess, selecting unit updates status
 		dsk_update_status();
 		if (trace)
-			fprintf(stderr, "Selected hawk unit %i. %i%i\n", val, hawk[val].on_cyl, hawk[val].ready);
+			fprintf(stderr, "Selected hawk unit %i\n", val);
 		break;
 	case 0xF141:
 		// bits are xxCC_CCCC_CCCH_SSSS
@@ -658,6 +662,7 @@ void dsk_write(uint16_t addr, uint8_t val, unsigned trace)
 uint8_t dsk_read(uint16_t addr, unsigned trace)
 {
 	uint8_t status;
+	unsigned drive = dsk_selected_unit / 2;
 	switch (addr) {
 	case 0xF141:
 		// 16bit word
@@ -672,9 +677,9 @@ uint8_t dsk_read(uint16_t addr, unsigned trace)
 		// Continued
 
 		// Make sure hawk unit has latest state
-		hawk_update(&hawk[dsk_selected_unit], get_current_time());
+		hawk_update(&hawk[drive], get_current_time());
 
-		return (dsk_cylinder << 5) | (dsk_head << 4) | hawk[dsk_selected_unit].sector_addr;
+		return (dsk_cylinder << 5) | (dsk_head << 4) | hawk[drive].sector_addr;
 	case 0xF144:
 		status = dsk_status >> 8;
 		if (trace)

@@ -8,13 +8,13 @@
 #include <string.h>
 #include <unistd.h>
 
-static void hawk_write_bits(struct hawk_unit* unit, int count, uint8_t* data);
-static void hawk_set_bits(struct hawk_unit* unit, int count, uint8_t val);
-static void hawk_erase_bits(struct hawk_unit* unit, int count);
+static void hawk_write_bits(struct hawk_drive* unit, int count, uint8_t* data);
+static void hawk_set_bits(struct hawk_drive* unit, int count, uint8_t val);
+static void hawk_erase_bits(struct hawk_drive* unit, int count);
 
 struct seek_event_t {
     struct event_t event;
-    struct hawk_unit *unit;
+    struct hawk_drive *unit;
     unsigned seek_error;
 };
 
@@ -65,7 +65,7 @@ static struct seek_event_t seek_event[8] = {{
 
 struct rotation_event_t {
     struct event_t event;
-    struct hawk_unit *unit;
+    struct hawk_drive *unit;
     unsigned in_process;
     unsigned update_data_ptr;
 };
@@ -82,7 +82,7 @@ static struct rotation_event_t rotation_event = {
 static void hawk_seek_callback(struct event_t* event, int64_t late_ns)
 {
     struct seek_event_t* e = (struct seek_event_t*)event;
-    struct hawk_unit* unit = e->unit;
+    struct hawk_drive* unit = e->unit;
 
     unit->seek_error = e->seek_error;
 
@@ -93,22 +93,28 @@ static void hawk_seek_callback(struct event_t* event, int64_t late_ns)
     unit->seeking = 0;
 
     // notify DSK emulation that something happened
-    dsk_hawk_changed(unit->unit_num, get_current_time() - late_ns);
+    dsk_hawk_changed(unit->drive_num, get_current_time() - late_ns);
 }
 
 // Reads entire track of data into host memory.
 // Converts from 400 byte sectors, into raw bits with gaps, sync and format info
-static int hawk_buffer_track(struct hawk_unit* unit, unsigned cyl, unsigned head) {
+static int hawk_buffer_track(struct hawk_drive* unit, unsigned fixed, unsigned cyl, unsigned head) {
     off_t offset = ((cyl << 5) | (head << 4)) * HAWK_SECTOR_BYTES;
     uint8_t buffer[HAWK_SECTOR_BYTES];
 
-    if (lseek(unit->fd, offset, SEEK_SET) == -1) {
+    int fd = fixed ? unit->fd_fixed : unit->fd_removable;
+    memset(unit->datacells, 0, sizeof(unit->datacells));
+
+    // If we don't have a platter installed, the seek is going to complete anyway
+    // There just won't be any data to read
+    if (fd == -1)
+        return 0;
+
+    if (lseek(fd, offset, SEEK_SET) == -1) {
         fprintf(stderr, "hawk position failed (%d,%d,0) = %lx.\n",
             cyl, head, (long) offset);
         return 0;
     }
-
-    memset(unit->datacells, 0, sizeof(unit->datacells));
 
     for (int sector = 0; sector < HAWK_SECTS_PER_TRK; sector++) {
         unit->data_ptr = sector * HAWK_RAW_SECTOR_BITS;
@@ -138,7 +144,7 @@ static int hawk_buffer_track(struct hawk_unit* unit, unsigned cyl, unsigned head
         hawk_set_bits(unit, 1, 1);
 
         // sector data
-        if (read(unit->fd, buffer, HAWK_SECTOR_BYTES) != HAWK_SECTOR_BYTES) {
+        if (read(fd, buffer, HAWK_SECTOR_BYTES) != HAWK_SECTOR_BYTES) {
             fprintf(stderr, "hawk read failed (%d,%d,%d).\n", cyl, head, sector);
             return 0;
         }
@@ -156,57 +162,47 @@ static int hawk_buffer_track(struct hawk_unit* unit, unsigned cyl, unsigned head
 }
 
 
-void hawk_seek(struct hawk_unit* unit, unsigned cyl, unsigned head)
+void hawk_seek(struct hawk_drive* unit, unsigned fixed, unsigned cyl, unsigned head)
 {
-    // The hawk unit only has 9 lines for cylinder addr, so address really
-    // should get masked.
-    // OR, is DSK expected to throw an error before seeking?
-
     if (unit->seeking)
         return;
 
     unit->seeking = 1;
     unit->addr_ack = 0;
     unit->addr_int = 0;
-    unit->current_track = cyl << 1 | head;
 
     unit->on_cyl = 0;
+    unit->selected = fixed;
 
-
-    off_t offset = (cyl << 5) | (head << 4) * HAWK_SECTOR_BYTES;
-    offset *= HAWK_SECTOR_BYTES;
-
-        if (cyl >= HAWK_NUM_CYLINDERS) {
+    // The hawk unit only has 9 lines for cylinder addr, so address really
+    // should get masked.
+    // OR, is DSK expected to throw an error before seeking?
+    if (cyl >= HAWK_NUM_CYLINDERS) {
         // Tried to seek past end of disk
         unit->addr_int = 1;
         return;
     }
 
+    off_t offset = (cyl << 5) | (head << 4) * HAWK_SECTOR_BYTES;
+    offset *= HAWK_SECTOR_BYTES;
+
     // According to specs, the average track-to-track seek time is 7.5ms.
     // TODO: Accurate seek times
-    struct seek_event_t* e = &seek_event[unit->unit_num];
+    struct seek_event_t* e = &seek_event[unit->drive_num];
     e->event.delta_ns = 7.5 * ONE_MILISECOND_NS;
     e->event.callback = hawk_seek_callback;
     e->unit = unit;
     e->seek_error = 0;
 
     // To simplify emulation, slurp the whole track into host memory
-    if (!hawk_buffer_track(unit, cyl, head)) {
-        // According to manual, a Seek Error is generated if the carriage
-        // goes beyond end of travel or on cyl is not present 0.5 seconds
-        // after initiation of CA Strobe or RTZ
-
-        // we will emulate our IO error as 500ms timeout
-        e->seek_error = 1;
-        e->event.delta_ns = 500 * ONE_MILISECOND_NS;
-    }
+    hawk_buffer_track(unit, fixed, cyl, head);
 
     unit->addr_ack = 1;
     schedule_event(&e->event);
 }
 
 
-void hawk_rtz(struct hawk_unit* unit)
+void hawk_rtz(struct hawk_drive* unit, unsigned fixed)
 {
     // According to manual, The Hawk drive unit will clear any seek
     // errors and faults on RTZS
@@ -214,10 +210,12 @@ void hawk_rtz(struct hawk_unit* unit)
     unit->fault = 0;
     unit->seeking = 0;
 
-    hawk_seek(unit, 0, 0);
+    hawk_seek(unit, fixed, 0, 0);
 }
 
-void hawk_update(struct hawk_unit* unit, int64_t now) {
+void hawk_update(struct hawk_drive* unit, int64_t now) {
+    unit->on_cyl = unit->ready && !unit->seeking;
+
     uint64_t rotation = (now + unit->rotation_offset) % (uint64_t)HAWK_ROTATION_NS;
 
     unit->head_pos = rotation / HAWK_BIT_NS;
@@ -225,7 +223,34 @@ void hawk_update(struct hawk_unit* unit, int64_t now) {
     unit->sector_pulse = (rotation % (int64_t)HAWK_SECTOR_NS) < HAWK_SECTOR_PULSE_NS;
 }
 
-int hawk_remaining_bits(struct hawk_unit* unit, uint64_t time) {
+void hawk_init(struct hawk_drive *unit, unsigned drive_num, int fd1, int fd2) {
+    memset(unit, 0, sizeof(struct hawk_drive));
+
+    unit->drive_num = drive_num;
+    unit->wprotect = 1;
+
+    hawk_setfd(unit, 0, fd1);
+    hawk_setfd(unit, 1, fd2);
+
+    // It's not actually possible to spin up a drive without a cartridge installed,
+    // So if we have either image, it's ready.
+    unit->ready = (fd1 != -1) || (fd2 != -1);
+
+    if (unit->ready) {
+        hawk_buffer_track(unit, 0, 0, 0);
+        hawk_update(unit, 0);
+    }
+}
+
+void hawk_setfd(struct hawk_drive* unit, unsigned fixed, int fd) {
+    if (fixed)
+        unit->fd_fixed = fd;
+    else
+        unit->fd_removable = fd;
+}
+
+
+int hawk_remaining_bits(struct hawk_drive* unit, uint64_t time) {
     hawk_update(unit, time);
     return unit->head_pos - unit->data_ptr;
 }
@@ -235,7 +260,7 @@ static void hawk_rotation_event_cb(struct event_t* event, int64_t late_ns)
     assert(event == &rotation_event.event);
     rotation_event.in_process = 0;
 
-    struct hawk_unit* unit = rotation_event.unit;
+    struct hawk_drive* unit = rotation_event.unit;
 
     int64_t time = get_current_time() - late_ns;
     hawk_update(unit, time);
@@ -243,10 +268,10 @@ static void hawk_rotation_event_cb(struct event_t* event, int64_t late_ns)
      // Copy current head position to read/write pointer
     if (rotation_event.update_data_ptr)
         unit->data_ptr = unit->head_pos;
-    dsk_hawk_changed(unit->unit_num, time);
+    dsk_hawk_changed(unit->drive_num, time);
 }
 
-void hawk_wait_sector(struct hawk_unit* unit, unsigned sector) {
+void hawk_wait_sector(struct hawk_drive* unit, unsigned sector) {
     int64_t now = get_current_time();
     int64_t rotation = (now + unit->rotation_offset) % (uint64_t)HAWK_ROTATION_NS;
     int64_t desired_rotation = HAWK_SECTOR_NS * sector;
@@ -266,7 +291,7 @@ void hawk_wait_sector(struct hawk_unit* unit, unsigned sector) {
     schedule_event(&rotation_event.event);
 }
 
-int hawk_wait_sync(struct hawk_unit* unit) {
+int hawk_wait_sync(struct hawk_drive* unit) {
     if (rotation_event.in_process)
         return 1;
 
@@ -300,7 +325,7 @@ int hawk_wait_sync(struct hawk_unit* unit) {
     return 1;
 }
 
-void hawk_read_bits(struct hawk_unit* unit, int count, uint8_t *dest) {
+void hawk_read_bits(struct hawk_drive* unit, int count, uint8_t *dest) {
     while (1) {
         uint8_t byte = 0;
         uint8_t bit;
@@ -327,13 +352,13 @@ void hawk_read_bits(struct hawk_unit* unit, int count, uint8_t *dest) {
     }
 }
 
-uint8_t hawk_read_byte(struct hawk_unit* unit) {
+uint8_t hawk_read_byte(struct hawk_drive* unit) {
     uint8_t byte = 0;
     hawk_read_bits(unit, 8, &byte);
     return byte;
 }
 
-uint16_t hawk_read_word(struct hawk_unit* unit) {
+uint16_t hawk_read_word(struct hawk_drive* unit) {
     // byteswap to little endian
     uint16_t word = hawk_read_byte(unit) << 8;
     word |= hawk_read_byte(unit);
@@ -341,14 +366,14 @@ uint16_t hawk_read_word(struct hawk_unit* unit) {
     return word;
 }
 
-void hawk_rewind(struct hawk_unit* unit, int count) {
+void hawk_rewind(struct hawk_drive* unit, int count) {
     unit->data_ptr = unit->data_ptr - count;
     if (unit->data_ptr < 0)
         unit->data_ptr += HAWK_RAW_TRACK_BITS;
 }
 
-static void hawk_write_bits(struct hawk_unit* unit, int count, uint8_t* data) {
-    while (1) {
+static void hawk_write_bits(struct hawk_drive* unit, int count, uint8_t* data) {
+    while (count > 0) {
         uint8_t byte = *(data++);
         for (int shift = 7; shift >= 0; shift--) {
             if (count-- == 0)
@@ -360,7 +385,7 @@ static void hawk_write_bits(struct hawk_unit* unit, int count, uint8_t* data) {
     }
 }
 
-static void hawk_set_bits(struct hawk_unit* unit, int count, uint8_t val) {
+static void hawk_set_bits(struct hawk_drive* unit, int count, uint8_t val) {
     val = (val & 1) | HAWK_DATACELL_CLOCK_BIT;
 
     while (count--) {
@@ -368,7 +393,7 @@ static void hawk_set_bits(struct hawk_unit* unit, int count, uint8_t val) {
     }
 }
 
-static void hawk_erase_bits(struct hawk_unit* unit, int count) {
+static void hawk_erase_bits(struct hawk_drive* unit, int count) {
     while (count--) {
         unit->datacells[unit->data_ptr++] = 0;
     }

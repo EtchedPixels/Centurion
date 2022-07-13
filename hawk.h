@@ -21,7 +21,7 @@
 #define HAWK_DATACELL_DATA_BIT  0x01
 #define HAWK_DATACELL_CLOCK_BIT 0x10
 
-struct hawk_unit {
+struct hawk_drive {
 // Output signals
 	// Ready
 	// High when:
@@ -90,11 +90,13 @@ struct hawk_unit {
 	uint8_t seeking;
 
 	// File handle of image file
-	int fd;
-	unsigned unit_num;
+	int fd_removable;
+	int fd_fixed;
 
-	// current cylinder << 1 | head
-	uint16_t current_track;
+	// assigned drive number
+	unsigned drive_num;
+
+	unsigned selected; // removable or fixed
 
 	// Datacells for current track
 	// Wastefully store 1 bit per byte.
@@ -108,16 +110,18 @@ struct hawk_unit {
 	uint64_t rotation_offset;
 };
 
-void hawk_seek(struct hawk_unit* unit, unsigned cyl, unsigned head);
-void hawk_rtz(struct hawk_unit* unit);
-int hawk_remaining_bits(struct hawk_unit* unit, uint64_t time);
-void hawk_read_bits(struct hawk_unit* unit, int count, uint8_t *dest);
-uint8_t hawk_read_byte(struct hawk_unit* unit);
-uint16_t hawk_read_word(struct hawk_unit* unit);
-void hawk_rewind(struct hawk_unit* unit, int count); // cheating
-void hawk_wait_sector(struct hawk_unit* unit, unsigned sector);
-int hawk_wait_sync(struct hawk_unit* unit);
-void hawk_update(struct hawk_unit* unit, int64_t now);
+void hawk_init(struct hawk_drive* unit, unsigned drive_num, int fd1, int fd2);
+void hawk_setfd(struct hawk_drive* unit, unsigned fixed, int fd);
+void hawk_seek(struct hawk_drive* unit, unsigned fixed, unsigned cyl, unsigned head);
+void hawk_rtz(struct hawk_drive* unit, unsigned fixed);
+int hawk_remaining_bits(struct hawk_drive* unit, uint64_t time);
+void hawk_read_bits(struct hawk_drive* unit, int count, uint8_t *dest);
+uint8_t hawk_read_byte(struct hawk_drive* unit);
+uint16_t hawk_read_word(struct hawk_drive* unit);
+void hawk_rewind(struct hawk_drive* unit, int count); // cheating
+void hawk_wait_sector(struct hawk_drive* unit, unsigned sector);
+int hawk_wait_sync(struct hawk_drive* unit);
+void hawk_update(struct hawk_drive* unit, int64_t now);
 
 // Callback to dsk
 void dsk_hawk_changed(unsigned unit, int64_t time);

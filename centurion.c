@@ -825,7 +825,8 @@ int main(int argc, char *argv[])
 					fprintf(stderr, "DMA stalled\n");
 					exit(-1);
 				}
-				cpu_timestamp_ns = next;
+				if (next > cpu_timestamp_ns)
+					cpu_timestamp_ns = next;
 				run_scheduler(cpu_timestamp_ns, trace & TRACE_SCHEDULER);
 			}
 			hawk_dma_done();
