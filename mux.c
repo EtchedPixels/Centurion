@@ -8,6 +8,7 @@
 #include "console.h"
 #include "cpu6.h"
 #include "mux.h"
+#include "scheduler.h"
 
 struct MuxUnit mux[NUM_MUX_UNITS];
  // 0 disables interrupts
@@ -315,7 +316,7 @@ void mux_set_read_ready(unsigned unit, unsigned trace)
 }
 
 void mux_process_events(unsigned unit, unsigned trace) {
-	uint64_t time = get_current_time();
+	int64_t time = get_current_time();
 
 	if (mux[unit].rx_ready_time && mux[unit].rx_ready_time <= time) {
 		assert(mux[unit].in_fd != -1);

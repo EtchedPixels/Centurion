@@ -14,14 +14,15 @@
 #include "console.h"
 #include "cpu6.h"
 #include "dma.h"
-#include "hawk.h"
+#include "dsk.h"
 #include "mux.h"
 #include "cbin_load.h"
+#include "scheduler.h"
 
 static unsigned finch;		/* Finch or original FDC */
 
 volatile unsigned int emulator_done;
-static uint64_t cpu_timestamp_ns = 0;
+static int64_t cpu_timestamp_ns = 0;
 
 #define TRACE_MEM_RD	1
 #define TRACE_MEM_WR	2
@@ -32,6 +33,7 @@ static uint64_t cpu_timestamp_ns = 0;
 #define TRACE_PARITY	64
 #define TRACE_MUX	128
 #define TRACE_DSK       256
+#define TRACE_SCHEDULER 512
 
 unsigned int trace = 0;
 
@@ -507,7 +509,7 @@ static uint8_t io_read8(uint16_t addr)
 	if (addr == 0xF110)
 		return switches;
 	if (addr >= 0xF140 && addr <= 0xF14F)
-		return hawk_read(addr, trace & TRACE_DSK);
+		return dsk_read(addr, trace & TRACE_DSK);
 	if (addr >= 0xF200 && addr <= 0xF21F)
 		return mux_read(addr, trace & TRACE_MUX);
 	fprintf(stderr, "%04X: Unknown I/O read %04X\n", cpu6_pc(), addr);
@@ -526,7 +528,7 @@ static void io_write8(uint16_t addr, uint8_t val)
 		hexdisplay(addr, val);
 		return;
 	} else if (addr >= 0xF140 && addr <= 0xF14F) {
-		hawk_write(addr, val, trace & TRACE_DSK);
+		dsk_write(addr, val, trace & TRACE_DSK);
 		return;
 	} else if (addr >= 0xF200 && addr <= 0xF21F) {
 		mux_write(addr, val, trace & TRACE_MUX);
@@ -636,7 +638,7 @@ void mem_write16_debug(uint32_t addr, uint16_t val)
 	mem_write8_debug(addr+1, val & 0xff);
 }
 
-uint64_t get_current_time() {
+int64_t get_current_time() {
 	return cpu_timestamp_ns;
 }
 
@@ -772,7 +774,7 @@ int main(int argc, char *argv[])
 		load_rom("Diag_F4_1133CMD.BIN", 0x09800, 0x0800);
 	}
 
-	hawk_init();
+	dsk_init();
 	cpu6_init();
 
 	if (boot_file != NULL) {
@@ -807,20 +809,27 @@ int main(int argc, char *argv[])
 		}
 	}
 
+	throttle_init();
+	throttle_set_speed(1.0);
+
 	while (!emulator_done) {
 		cpu6_execute_one(trace & TRACE_CPU);
 		if (cpu6_halted())
 			halt_system();
 		/* Service DMA */
-		if (hawk_dma == 1) {
-			if (dma_read_cycle(hawk_read_next()))
-				hawk_dma_done();
-		}
-		if (hawk_dma == 2) {
-			if (dma_write_active())
-				hawk_write_next(dma_write_cycle());
-			else
-				hawk_dma_done();
+		if (hawk_dma) {
+			while(dma_write_active()) {
+				// Advance time to next scheduler event
+				int64_t next = scheduler_next();
+				if (next == -1) {
+					fprintf(stderr, "DMA stalled\n");
+					exit(-1);
+				}
+				if (next > cpu_timestamp_ns)
+					cpu_timestamp_ns = next;
+				run_scheduler(cpu_timestamp_ns, trace & TRACE_SCHEDULER);
+			}
+			hawk_dma_done();
 		}
 		/* Floppy controller command host to controller */
 		if (fd_dma == 1) {
@@ -845,6 +854,9 @@ int main(int argc, char *argv[])
 		}
 		/* Update peripherals state */
 		mux_poll(trace & TRACE_MUX);
+
+		run_scheduler(cpu_timestamp_ns, trace & TRACE_SCHEDULER);
+		throttle_emulation(cpu_timestamp_ns);
 
 		instruction_count++;
 		if (terminate_at && instruction_count >= terminate_at) {

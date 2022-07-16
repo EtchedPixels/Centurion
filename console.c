@@ -8,10 +8,12 @@
 #include <sys/select.h>
 #include <sys/socket.h>
 #include <arpa/inet.h>
+#include <time.h>
 
 #include "centurion.h"
 #include "console.h"
 #include "mux.h"
+#include "scheduler.h"
 
 static struct termios saved_term, term;
 
@@ -109,7 +111,7 @@ void mux_poll_fds(unsigned trace)
 		int ifd = mux_get_in_poll_fd(unit);
 
 		if (ifd == -1)
-			continue;		
+			continue;
 		FD_SET(ifd, &i);
 		if (ifd >= max_fd)
 			max_fd = ifd + 1;
@@ -125,5 +127,45 @@ void mux_poll_fds(unsigned trace)
 
 		if (ifd != -1 && FD_ISSET(ifd, &i))
 			mux_set_read_ready(unit, trace);
+	}
+}
+
+
+// Get's the current time from the OS (in nanoseconds)
+uint64_t monotonic_time_ns() {
+	struct timespec ts;
+	clock_gettime(CLOCK_MONOTONIC, &ts);
+	return ts.tv_sec * 1000000000ULL + ts.tv_nsec;
+}
+
+
+static uint64_t throttle_start_time;
+static float throttle_speed;
+
+void throttle_init() {
+	throttle_start_time = monotonic_time_ns();
+}
+
+void throttle_set_speed(float speed) {
+	throttle_speed = speed;
+}
+
+// Stall emulation if running faster than realtime
+void throttle_emulation(uint64_t expected_time_ns) {
+	uint64_t now = monotonic_time_ns();
+	uint64_t adjusted_target = expected_time_ns / throttle_speed;
+	int64_t delta_ns = (throttle_start_time + adjusted_target) - now;
+
+	// We don't want to sleep if the delta is less than 5ms
+	if (delta_ns > (5 * ONE_MILISECOND_NS)) {
+		struct timespec delta;
+		delta.tv_sec = delta_ns / 1000000000ULL;
+		delta.tv_nsec = delta_ns % 1000000000ULL;
+
+		// sometimes nanosecond returns early, so loop until it finishs
+		while (nanosleep(&delta, &delta));
+	} else if (delta_ns < -(50 * ONE_MILISECOND_NS)) {
+		// If have lagged by too much, we forgive the time
+		//throttle_start_time += delta_ns;
 	}
 }
