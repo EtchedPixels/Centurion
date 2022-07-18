@@ -49,6 +49,9 @@ static uint8_t dsk_irq = 2;
 // F140 selected unit
 static uint8_t dsk_selected_unit;
 
+// F143 write enable mask
+static uint8_t dsk_write_mask;
+
 static uint16_t dsk_cylinder;
 static uint8_t  dsk_head;
 static uint8_t  dsk_sector;
@@ -600,7 +603,7 @@ void dsk_write(uint16_t addr, uint8_t val, unsigned trace)
 		dsk_head = !!(val & 0x10);
 		dsk_sector = val & 0x0f;
 		break;
-	// case 0xF143:
+	case 0xF143:
 		/* "It is a Write Enable Bit Mask to help protect against writing to a
 		*  disk platter in error should someone just enter a 0x1 Write Command
 		*  or 0x4 Format Command in error to 0xF148.
@@ -614,7 +617,8 @@ void dsk_write(uint16_t addr, uint8_t val, unsigned trace)
 		*  128 = Write Enable Platter = 1 drive 4
 		*  Regards, Ken R."
 		*/
-
+                dsk_write_mask = val;
+		break;
 	case 0xF144:
 	case 0xF145:
 		/* Guess.. it's done early in boot */
