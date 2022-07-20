@@ -9,6 +9,17 @@
 #include "cpu6.h"
 #include "mux.h"
 #include "scheduler.h"
+#include "trace.h"
+
+#define TRACE_WITH_CHAR(val, ...)					\
+	if (trace) {							\
+		fprintf(stderr, "%04X ", cpu6_pc());			\
+		fprintf(stderr, __VA_ARGS__);				\
+		fprintf(stderr, " %x", val);				\
+		if ((val&0x7f) >= 0x20 && val != 0x7F && val != 0xff)	\
+			fprintf(stderr, " ('%c')", val & 0x7f);		\
+		fputc('\n', stderr);					\
+	}
 
 struct MuxUnit mux[NUM_MUX_UNITS];
 static unsigned char irq_level;
@@ -101,8 +112,8 @@ static int mux_assert_irq(unsigned unit, unsigned reason, unsigned trace)
 	if (!irq_enabled)
 		return 0;
 
-	if (trace && irq_cause != (unit << 1 | reason))
-		fprintf(stderr, "MUX%i: %s IRQ raised\n", unit, reason ? "TX" : "RX");
+	if (irq_cause != (unit << 1 | reason))
+		TRACE("MUX%i: %s IRQ raised", unit, reason ? "TX" : "RX");
 
 	// Cause is actually the lower 8 bits of unit that caused the interrupt
 	// Though, TX interrupts have the lower bit set
@@ -114,14 +125,13 @@ static int mux_assert_irq(unsigned unit, unsigned reason, unsigned trace)
 
 static void mux_enable_irq(unsigned char enable, unsigned trace)
 {
-	if (trace)
-		fprintf(stderr, "%04X MUX irq enable = %d\n", cpu6_pc(), enable);
+	TRACE_PC("MUX irq enable = %d\n", enable);
 	irq_enabled = enable;
 }
 
 static void mux_unit_send(unsigned unit, uint8_t val) {
 	if (!(mux[unit].status & MUX_TX_READY)) {
-		fprintf(stderr, "%04X: Write to busy MUX%i port\n", cpu6_pc(), unit);
+		WARN_PC("Write to busy MUX%i port", unit);
 	}
 	mux[unit].status &= ~MUX_TX_READY;
 	uint64_t symbol_time = (1000000000.0 / (double)mux[unit].baud);
@@ -204,42 +214,33 @@ void mux_write(uint16_t addr, uint8_t val, uint32_t trace)
 	}
 
 	if (unit > NUM_MUX_UNITS) {
-		fprintf(stderr, "%04X MUX%i: Write to disabled unit reg %x\n", cpu6_pc(), unit, addr);
+		TRACE_PC("MUX%i: Write to disabled unit reg %x", unit, addr);
 		return;
 	}
 
 	switch(mode) {
 	case 0: // Status Reg
-		if (trace)
-			fprintf(stderr, "%04X MUX%i: Status Write %x\n", cpu6_pc(), unit, val);
+		TRACE_PC("MUX%i: Status Write %x", unit, val);
 		// TODO: Implement baud
 		break;
 	case 1: // Data Reg
-		if (trace) {
-			fprintf(stderr, "%04X MUX%i: Data Write %x\n", cpu6_pc(), unit, val);
-			if ((val&0x7f) >= 0x20 && val != 0x7F && val != 0xff)
-				fprintf(stderr, " ('%c')", val & 0x7f);
-			fputc('\n', stderr);
-		}
+		TRACE_WITH_CHAR(val, "MUX%i: Data Write", unit);
 		mux_unit_send(unit, val);
 		break;
 	case 8:
 		/* This controls RTS lines. Bits 1 and 2 specify unit number,
 		 * bit 0 is the actual value to set on the respective line.
 		 */
-		if (trace)
-			fprintf(stderr, "%04X MUX%d RTS = %d\n", cpu6_pc(), val >> 1, val & 1);
+		TRACE_PC("MUX%d RTS = %d", val >> 1, val & 1);
 		break;
 	/* Register 9 isn't used */
 	case 0xA: // Set interrupt request level
-		if (trace)
-			fprintf(stderr, "%04X MUX%i: IRQ level = %i\n", cpu6_pc(), unit, val);
+		TRACE_PC("MUX%i: IRQ level = %i", unit, val);
 		irq_level = val;
 		break;
 	case 0xB:
 		/* This configures custom baud rate */
-		if (trace)
-			fprintf(stderr, "%04X MUX custom baud rate %02x\n", cpu6_pc(), val);
+		TRACE_PC("MUX custom baud rate %02x", val);
 		break;
 	case 0xC:
 		/* OPSYS kernel writes unit number (starting from 1)
@@ -260,13 +261,12 @@ void mux_write(uint16_t addr, uint8_t val, uint32_t trace)
 		break;
 	case 0xF:
 	        /* Reset the card, the value is ignored */
-		if (trace)
-			fprintf(stderr, "%04X MUX reset\n", cpu6_pc());
+		TRACE_PC("MUX reset");
 		cpu_deassert_irq(irq_level);
 		mux_reset();
 		break;
 	default:
-		fprintf(stderr, "\n%04X Write to unknown MUX register %x=%02x\n", cpu6_pc(), addr, val);
+		WARN_PC("Write to unknown MUX register %x=%02x", addr, val);
 		break;
 	}
 }
@@ -279,8 +279,7 @@ uint8_t mux_read(uint16_t addr, uint32_t trace)
 
 	// It seems that all mux units share the same cause register via chaining
 	if (addr == 0xf20f) {
-		if (trace)
-			fprintf(stderr, "%04X MUX: InterruptCause Read: %02x\n", cpu6_pc(), irq_cause);
+		TRACE_PC("MUX: InterruptCause Read: %02x", irq_cause);
 
 		if (irq_cause & MUX_IRQ_TX) {
 			// Reading this register is enough to clear the TX IRQ, but it seems
@@ -288,8 +287,7 @@ uint8_t mux_read(uint16_t addr, uint32_t trace)
 			unsigned char unit = (irq_cause & MUX_UNIT_MASK) >> 1;
 			mux[unit].tx_done = 0;
 
-			if (trace)
-				fprintf(stderr, "MUX%i: TX IRQ acknowledged\n", unit);
+			TRACE("MUX%i: TX IRQ acknowledged", unit);
 		}
 
 		return irq_cause;
@@ -315,7 +313,7 @@ uint8_t mux_read(uint16_t addr, uint32_t trace)
 
 	if (unit > NUM_MUX_UNITS) {
 		if (addr != 0xf20f)
-			fprintf(stderr, "%04X MUX%i: Read to disabled unit reg %x", cpu6_pc(), unit, addr);
+			WARN_PC("MUX%i: Read to disabled unit reg %x", unit, addr);
 		return data;
 	}
 
@@ -324,19 +322,16 @@ uint8_t mux_read(uint16_t addr, uint32_t trace)
 	case 0x0: // Status register
 		// Force CTS on
 		data = mux[unit].status | MUX_CTS;
-		if (trace)
-			fprintf(stderr, "%04X MUX%i: Status Read = %02x\n", cpu6_pc(), unit, data);
-
+		TRACE_PC("MUX%i: Status Read = %02x", unit, data);
 		break;
 	case 0x1:
 		// Data register
 		data = next_char(unit);
 		mux[unit].status &= ~MUX_RX_READY;
-		if (trace)
-			fprintf(stderr, "%04X MUX%i: Data Read = %02x ('%c')\n", cpu6_pc(), unit, data, data);
+		TRACE_WITH_CHAR(data, "MUX%i: Data Read =", unit);
 		break;
 	default:
-		fprintf(stderr, "%04X MUX%i: Unknown Register %x Read\n", cpu6_pc(), unit, addr);
+		WARN_PC("MUX%i: Unknown Register %x Read", unit, addr);
 		break;
 	}
 
@@ -361,8 +356,7 @@ void mux_process_events(unsigned unit, unsigned trace) {
 		mux[unit].status |= MUX_RX_READY;
 		poll_count = 0;
 
-		if (trace)
-			fprintf(stderr, "MUX%i: RX_READY\n", unit);
+		TRACE("MUX%i: RX_READY", unit);
 	}
 
 	if (mux[unit].tx_done_time && mux[unit].tx_done_time <= time) {
@@ -379,8 +373,7 @@ void mux_process_events(unsigned unit, unsigned trace) {
 		if (irq_enabled)
 			mux[unit].tx_done = 1;
 
-		if (trace)
-			fprintf(stderr, "MUX%i: TX_READY; TX_DONE = %d\n", unit, mux[unit].tx_done);
+		TRACE("MUX%i: TX_READY; TX_DONE = %d", unit, mux[unit].tx_done);
 	}
 }
 
@@ -411,8 +404,8 @@ void mux_poll(unsigned trace)
 			return;
 	}
 
-	if (trace && irq_cause >= 0)
-		fprintf(stderr, "MUX: Last mux interrupt acknowledged\n");
+	if (irq_cause >= 0)
+		TRACE("MUX: Last mux interrupt acknowledged");
 
 	irq_cause = -1;
 }
