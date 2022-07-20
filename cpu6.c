@@ -20,6 +20,7 @@
 #include <stdlib.h>
 #include <string.h>
 
+#include "cbin.h"
 #include "cpu6.h"
 #include "disassemble.h"
 
@@ -447,6 +448,69 @@ static uint8_t block_op_getLen(int inst, int op) {
 	}
 }
 
+static void cbin_load_segment(uint16_t sa, uint16_t load_offset, unsigned trace)
+{
+	uint8_t type = mmu_mem_read8(sa);
+	uint8_t len = mmu_mem_read8(sa + 1);
+	uint16_t addr = mmu_mem_read16(sa + 2);
+	uint8_t checksum = type + len + (addr >> 8) + (addr & 0xFF);
+	uint8_t expected;
+
+	if (trace)
+        	fprintf(stderr, "%04X: cbin section @ %04X type %08X length %u addr %04X load_offset %04X\n",
+	        	cpu6_pc(), sa, type, len, addr, load_offset);
+
+        sa += 4;
+	alu_out &= ~ALU_L;
+
+        switch (type)
+	{
+        case CBIN_DATA:
+	    for (int i = 0; i < len; i++) {
+		uint8_t val = mmu_mem_read8(sa++);
+
+	        mmu_mem_write8(load_offset + addr + i, val);
+		checksum += val;
+            }
+            break;
+        case CBIN_FIXUPS:
+            // Apply fixups
+            if (len % 2 == 1){
+                fprintf(stderr, "%04X: loadseg: FIXUPS record must have even length; have %u\n", cpu6_pc(), len);
+                alu_out |= ALU_F;
+            } else {
+                uint16_t offset = load_offset + addr;
+
+                for (size_t i = 0; i < len; i += 2) {
+                    uint16_t fixup_addr = mmu_mem_read16(sa);
+                    uint16_t fixup_val = mmu_mem_read16(fixup_addr + load_offset);
+
+                    mmu_mem_write16(fixup_addr + load_offset, fixup_val + offset);
+		    checksum += (fixup_addr >> 8) + (fixup_addr & 0xFF);
+		    sa += 2;
+                }
+	    }
+            break;
+        default:
+            fprintf(stderr, "%04X: unknown cbin segment type %02x\n", cpu6_pc(), type);
+            alu_out |= ALU_F;
+	}
+
+	checksum = 0x0100 - checksum;
+	expected = mmu_mem_read8(sa++);
+	if (checksum != expected) {
+		fprintf(stderr, "%04X: loadseg checksum error: %08X vs %08X\n",
+		        cpu6_pc(), checksum, expected);
+		alu_out |= ALU_F;
+	}
+
+	// It looks like A is implicit here
+        regpair_write(A, load_offset + addr);
+	// loadseg operation modifies its second argument. For simplicity we
+	// assume only a register is valid.
+	regpair_write(twobit_cached_reg & 0xe, sa);
+}
+
 /*
  *	Block/String operations
  *
@@ -460,7 +524,7 @@ static uint8_t block_op_getLen(int inst, int op) {
  *	Not all sub-ops take a length.
  *	Some sub-ops take additional args, as immediate or implicit reg
  */
-static int block_op(int inst)
+static int block_op(int inst, unsigned trace)
 {
 	unsigned op = fetch();
 	unsigned am = op & 0x0F;
@@ -491,6 +555,12 @@ static int block_op(int inst)
 	da = get_twobit(am, 1, dst_len);
 
 	switch(op & 0xF0) {
+	case 0x00:
+		// Load a segment of a binary file
+		// [sa] = destination offset
+		// da = a pointer to a segment
+		cbin_load_segment(da, mmu_mem_read16(sa), trace);
+		return 0;
 	case 0x20:
 		// copies bytes from src to dst, stopping if a byte matches chr
 		// appears to be combined memcpy/memchr/strcpy
@@ -2412,7 +2482,7 @@ unsigned cpu6_execute_one(unsigned trace)
 	if (op == 0x46)
 		return bignum_op();
 	if (op == 0x47)
-		return block_op(0x47);
+		return block_op(0x47, trace);
 	if (op < 0x50)
 		return alu4x_op();
 	if (op == 0x66)
@@ -2420,7 +2490,7 @@ unsigned cpu6_execute_one(unsigned trace)
 	if (op < 0x60)
 		return alu5x_op();
 	if (op == 0x67)
-		return block_op(0x67);
+		return block_op(0x67, trace);
 	if (op < 0x70)
 		return x_op();
 	if (op == 0x77 || op == 0x78)
