@@ -2398,6 +2398,14 @@ static int semaphore_op(void) {
 	exit(1);
 }
 
+/* 76 - Enable parity checking
+ * 86 - Disable parity checking
+ */
+static int parity_op(void) {
+	// unimplemented
+	return 0;
+}
+
 /*
  *	The CPU has directly controlled flags for C N Z I
  *	We know from the branch rules there is an internal V flag
@@ -2487,6 +2495,8 @@ unsigned cpu6_execute_one(unsigned trace)
 		return alu5x_op();
 	if (op == 0x67)
 		return block_op(0x67, trace);
+	if (op == 0x76 || op == 0x86)
+		return parity_op();
 	if (op < 0x70)
 		return x_op();
 	if (op == 0x77 || op == 0x78)
