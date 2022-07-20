@@ -11,12 +11,29 @@
 #include "scheduler.h"
 
 struct MuxUnit mux[NUM_MUX_UNITS];
- // 0 disables interrupts
- // LOAD writes 0 to F20A before transferring execution to a new binary
-static unsigned char rx_ipl_request = 0;
-static unsigned char tx_ipl_request = 0;
-static int irq_cause = -1;
-static uint32_t poll_count = 0;
+static unsigned char irq_level;
+static unsigned char irq_enabled;
+static int irq_cause;
+static uint32_t poll_count;
+
+static void mux_reset(void)
+{
+	int i;
+
+	for (i = 0; i < NUM_MUX_UNITS; i++) {
+		mux[i].status        = MUX_TX_READY;
+		mux[i].lastc         = 0xFF;
+		mux[i].baud          = 9600;
+		mux[i].tx_done       = 0;
+		mux[i].rx_ready_time = 0;
+	        mux[i].tx_done_time  = 0;
+	}
+
+	irq_level   = 0;
+	irq_enabled = 0;
+	irq_cause   = -1;
+	poll_count  = 0;
+}
 
 // Set the initial state for all out ports
 void mux_init(void)
@@ -26,12 +43,9 @@ void mux_init(void)
 	for (i = 0; i < NUM_MUX_UNITS; i++) {
 		mux[i].in_fd = -1;
 		mux[i].out_fd = -1;
-		mux[i].status = MUX_TX_READY;
-		mux[i].lastc = 0xFF;
-		mux[i].baud = 9600;
-		mux[i].rx_ready_time = 0;
-        mux[i].tx_done_time = 0;
 	}
+
+	mux_reset();
 }
 
 void mux_attach(unsigned unit, int in_fd, int out_fd)
@@ -84,9 +98,7 @@ static unsigned int next_char(uint8_t unit)
 
 static int mux_assert_irq(unsigned unit, unsigned reason, unsigned trace)
 {
-	char ipl = reason ? tx_ipl_request : rx_ipl_request;
-
-	if (!ipl)
+	if (!irq_enabled)
 		return 0;
 
 	if (trace && irq_cause != (unit << 1 | reason))
@@ -95,14 +107,21 @@ static int mux_assert_irq(unsigned unit, unsigned reason, unsigned trace)
 	// Cause is actually the lower 8 bits of unit that caused the interrupt
 	// Though, TX interrupts have the lower bit set
 	irq_cause = (unit << 1) | reason;
-	cpu_assert_irq(ipl);
+	cpu_assert_irq(irq_level);
 
 	return 1;
 }
 
+static void mux_enable_irq(unsigned char enable, unsigned trace)
+{
+	if (trace)
+		fprintf(stderr, "%04X MUX irq enable = %d\n", cpu6_pc(), enable);
+	irq_enabled = enable;
+}
+
 static void mux_unit_send(unsigned unit, uint8_t val) {
 	if (!(mux[unit].status & MUX_TX_READY)) {
-		fprintf(stderr, "Write to busy mux port\n");
+		fprintf(stderr, "%04X: Write to busy MUX%i port\n", cpu6_pc(), unit);
 	}
 	mux[unit].status &= ~MUX_TX_READY;
 	uint64_t symbol_time = (1000000000.0 / (double)mux[unit].baud);
@@ -194,7 +213,7 @@ void mux_write(uint16_t addr, uint8_t val, uint32_t trace)
 		if (trace)
 			fprintf(stderr, "%04X MUX%i: Status Write %x\n", cpu6_pc(), unit, val);
 		// TODO: Implement baud
-		return;
+		break;
 	case 1: // Data Reg
 		if (trace) {
 			fprintf(stderr, "%04X MUX%i: Data Write %x\n", cpu6_pc(), unit, val);
@@ -203,12 +222,25 @@ void mux_write(uint16_t addr, uint8_t val, uint32_t trace)
 			fputc('\n', stderr);
 		}
 		mux_unit_send(unit, val);
-		return;
-	case 0xA: // Set RX interrupt request level
+		break;
+	case 8:
+		/* This controls RTS lines. Bits 1 and 2 specify unit number,
+		 * bit 0 is the actual value to set on the respective line.
+		 */
 		if (trace)
-			fprintf(stderr, "%04X MUX%i: RX level = %i\n", cpu6_pc(), unit, val);
-		rx_ipl_request = val;
-		return;
+			fprintf(stderr, "%04X MUX%d RTS = %d\n", cpu6_pc(), val >> 1, val & 1);
+		break;
+	/* Register 9 isn't used */
+	case 0xA: // Set interrupt request level
+		if (trace)
+			fprintf(stderr, "%04X MUX%i: IRQ level = %i\n", cpu6_pc(), unit, val);
+		irq_level = val;
+		break;
+	case 0xB:
+		/* This configures custom baud rate */
+		if (trace)
+			fprintf(stderr, "%04X MUX custom baud rate %02x\n", cpu6_pc(), val);
+		break;
 	case 0xC:
 		/* OPSYS kernel writes unit number (starting from 1)
 		 * to this register and waits for the interrupt-driven write
@@ -217,20 +249,25 @@ void mux_write(uint16_t addr, uint8_t val, uint32_t trace)
 		 * waits for MUX_TX_READY bit to go high using a polled loop
 		 */
 		mux[val - 1].tx_done = 1;
-		return;
-	case 0xE: // Set TX interrupt request level
+		break;
+	case 0xD:
+	        /* Disable IRQ, the value is ignored */
+		mux_enable_irq(0, trace);
+		break;
+	case 0xE:
+		/* Enable IRQ, the value is ignored */
+		mux_enable_irq(1, trace);
+		break;
+	case 0xF:
+	        /* Reset the card, the value is ignored */
 		if (trace)
-			fprintf(stderr, "%04X MUX%i: TX level = %i\n", cpu6_pc(), unit, val);
-		tx_ipl_request = val;
-		return;
-	case 8: // These two are Written by @LOAD CRT driver
-	case 0xB:
-	case 0xD: // Raw text output is written here by WIPL; perhaps some debug port
-		if (!trace)
-			return; // Hide when not tracing
+			fprintf(stderr, "%04X MUX reset\n", cpu6_pc());
+		cpu_deassert_irq(irq_level);
+		mux_reset();
+		break;
 	default:
 		fprintf(stderr, "\n%04X Write to unknown MUX register %x=%02x\n", cpu6_pc(), addr, val);
-		return;
+		break;
 	}
 }
 
@@ -339,7 +376,7 @@ void mux_process_events(unsigned unit, unsigned trace) {
 			* perhaps a part of the status register, but we don't know which one,
 			* we haven't found any reads, so for now we keep it completely separate.
 			*/
-		if (tx_ipl_request)
+		if (irq_enabled)
 			mux[unit].tx_done = 1;
 
 		if (trace)
@@ -358,8 +395,7 @@ void mux_poll(unsigned trace)
 	if ((poll_count++ & 0xF) == 0)
 		mux_poll_fds(trace);
 
-	cpu_deassert_irq(rx_ipl_request);
-	cpu_deassert_irq(tx_ipl_request);
+	cpu_deassert_irq(irq_level);
 
 	/*
 	 * Updates current IRQ state and chooses current irq_cause register value according to
