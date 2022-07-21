@@ -1581,8 +1581,10 @@ static int branch_op(void)
 	case 13:		/* BS4 */
 		t = (switches & BS4);
 		break;
-	case 14:		/* BTM - branch on teletype mark - CPU4 only ? */
-		t = 0;
+	case 14:
+		/* Branch if interrupts enabled.
+		 * Was BTM - branch on teletype mark - on CPU4 */
+		t = int_enable;
 		break;
 	case 15:		/* B?? - branch of IL1 AH bit 0 set (see B6/C6) */
 		t = cpu_sram[0x10] & 0x01;
@@ -1878,6 +1880,13 @@ static int jump_op(void)
 		regpair_write(P, new_pc);
 	}
 	pc = new_pc;
+	return 0;
+}
+
+static int stcc(void)
+{
+	uint16_t addr = fetch16();
+	mmu_mem_write8(addr, alu_out);
 	return 0;
 }
 
@@ -2490,6 +2499,8 @@ unsigned cpu6_execute_one(unsigned trace)
 		return alu5x_op();
 	if (op == 0x67)
 		return block_op(0x67, trace);
+	if (op == 0x6f)
+		return stcc();
 	if (op < 0x70)
 		return x_op();
 	if (op == 0x77 || op == 0x78)
