@@ -1057,12 +1057,9 @@ static int dec(unsigned reg, unsigned val)
 static int clr(unsigned reg, unsigned v)
 {
 	reg_write(reg, v);
-	alu_out &= ~(ALU_F | ALU_L | ALU_M);
-	if (v == 0)
-		alu_out |= ALU_V;
-	else
-		/* Gets us past the tests but is probably wrong */
-		alu_out ^= ALU_V;
+	// Explicitly clears L and F flags
+	alu_out &= ~(ALU_L | ALU_F);
+	logic_flags(v);
 	return 0;
 }
 
@@ -1252,12 +1249,11 @@ static uint16_t dec16(uint16_t a, uint16_t imm)
 	return r;
 }
 
-/* Assume behaviour matches CLR */
 static uint16_t clr16(uint16_t a, uint16_t imm)
 {
-	alu_out &= ~(ALU_F | ALU_L | ALU_M);
-/*	if (imm == 0) */
-		alu_out |= ALU_V;
+	// Explicitly clears L and F flags
+	alu_out &= ~(ALU_L | ALU_F);
+	logic_flags16(imm);
 	return imm;
 }
 
@@ -2401,6 +2397,14 @@ static int semaphore_op(void) {
 	exit(1);
 }
 
+/* 76 - Enable parity checking
+ * 86 - Disable parity checking
+ */
+static int parity_op(void) {
+	// unimplemented
+	return 0;
+}
+
 /*
  *	The CPU has directly controlled flags for C N Z I
  *	We know from the branch rules there is an internal V flag
@@ -2490,6 +2494,8 @@ unsigned cpu6_execute_one(unsigned trace)
 		return alu5x_op();
 	if (op == 0x67)
 		return block_op(0x67, trace);
+	if (op == 0x76 || op == 0x86)
+		return parity_op();
 	if (op < 0x70)
 		return x_op();
 	if (op == 0x77 || op == 0x78)
