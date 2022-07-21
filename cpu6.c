@@ -504,11 +504,10 @@ static void cbin_load_segment(uint16_t sa, uint16_t load_offset, unsigned trace)
 		alu_out |= ALU_F;
 	}
 
-	// It looks like A is implicit here
-        regpair_write(A, load_offset + addr);
-	// loadseg operation modifies its second argument. For simplicity we
-	// assume only a register is valid.
-	regpair_write(twobit_cached_reg & 0xe, sa);
+	// According to sjsoftware, this instruction always provides these values
+	// in A and Z regardless of instruction operands
+	regpair_write(A, load_offset + addr);
+	regpair_write(Z, sa);
 }
 
 /*
