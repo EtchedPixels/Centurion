@@ -39,7 +39,7 @@ cbin_load.o: cpu6.h cbin.h
 
 math128.o: math128.h
 
-mux.o : centurion.h mux.h console.h cpu6.h scheduler.h
+mux.o : centurion.h mux.h console.h cpu6.h scheduler.h trace.h
 
 clean:
 	rm -f centurion *.o *~

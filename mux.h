@@ -16,9 +16,12 @@ struct MuxUnit
 };
 
 /* Status register bits */
-#define MUX_RX_READY (1 << 0)
-#define MUX_TX_READY (1 << 1)
-#define MUX_CTS      (1 << 5)
+#define MUX_RX_READY   (1 << 0)
+#define MUX_TX_READY   (1 << 1)
+#define MUX_PARITY_ERR (1 << 2)
+#define MUX_FRAME_ERR  (1 << 3)
+#define MUX_OVERRUN    (1 << 4)
+#define MUX_CTS        (1 << 5)
 
 /* Interrupt status register bits */
 #define MUX_IRQ_RX 0
