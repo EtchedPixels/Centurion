@@ -162,7 +162,7 @@ void throttle_emulation(uint64_t expected_time_ns) {
 		delta.tv_sec = delta_ns / 1000000000ULL;
 		delta.tv_nsec = delta_ns % 1000000000ULL;
 
-		// sometimes nanosecond returns early, so loop until it finishs
+		// sometimes nanosecond returns early, so loop until it finishes
 		while (nanosleep(&delta, &delta));
 	} else if (delta_ns < -(50 * ONE_MILISECOND_NS)) {
 		// If have lagged by too much, we forgive the time

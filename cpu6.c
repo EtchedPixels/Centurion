@@ -1121,7 +1121,7 @@ static int sll(unsigned reg, unsigned count)
 	return 0;
 }
 
-/* The CPU test checks that an RR with the low bit set propogates carry. It
+/* The CPU test checks that an RR with the low bit set propagates carry. It
    also checks that FF shift to 7F leaves n clear. The hex digit conversion
    confirms that the rotates are 9bit rotate through carry */
 static int rrc(unsigned reg, unsigned count)
@@ -1718,7 +1718,7 @@ static int low_op(void)
 			popbyte();	/* Skips one */
 			new_x = pop();	/* Loads X */
 			cpu_ipl = popbyte();	/* Loads new IL */
-			/* X is set off the stack and S is propogated */
+			/* X is set off the stack and S is propagated */
 			new_pc = regpair_read(X);
 			{
 				uint8_t byte = popbyte();
@@ -1827,7 +1827,7 @@ static int jump_op(void)
 		unsigned old_s = regpair_read(S);
 		cpu_ipl = 15;
 		/* Unclear if this also occurs */
-		/* Also seems to propogate S but can't be sure */
+		/* Also seems to propagate S but can't be sure */
 		regpair_write(S, old_s);
 		reg_write(CH, old_ipl);
 		return 0;
