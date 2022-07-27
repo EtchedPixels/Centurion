@@ -674,7 +674,7 @@ uint8_t dsk_read(uint16_t addr, unsigned trace)
 		// These two registers seem to be the current sector under head.
 		// But the unit doesn't report the actual cylinder/head position just
 		// the sector.
-		// So DSK probally combines the sector address with the last cyclinder
+		// So DSK probally combines the sector address with the last cylinder
 		// and head written to 0xF141
 		return dsk_cylinder >> 3;
 	case 0xF142:
