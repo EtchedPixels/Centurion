@@ -43,4 +43,3 @@ mux.o : centurion.h mux.h console.h cpu6.h scheduler.h trace.h
 
 clean:
 	rm -f centurion *.o *~
-
