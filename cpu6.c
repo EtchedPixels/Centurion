@@ -907,7 +907,7 @@ static void logic_flags(unsigned r)
 
 /*
  *	Shift
- *	L is the bit shfited out
+ *	L is the bit shifted out
  *	M is set as with logic
  *	V is set if result is zero
  *	Left shift/rotate: F is xor of L and M after shift
@@ -1007,7 +1007,7 @@ static void logic_flags16(unsigned r)
 
 /*
  *	Shift
- *	C is the bit shfited out
+ *	C is the bit shifted out
  *	M is set as with logic
  *	V is set if result is zero
  *	Left shift/rotate: F is xor of L and M after shift

@@ -131,7 +131,7 @@ void mux_poll_fds(unsigned trace)
 }
 
 
-// Get's the current time from the OS (in nanoseconds)
+// Gets the current time from the OS (in nanoseconds)
 uint64_t monotonic_time_ns() {
 	struct timespec ts;
 	clock_gettime(CLOCK_MONOTONIC, &ts);
